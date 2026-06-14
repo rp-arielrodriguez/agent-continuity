@@ -23,6 +23,11 @@ This repo provides that contract:
 - OpenCode and Claude integrations instruct agents to use the CLI instead of
   editing checkpoint files directly.
 
+## For Agents
+
+Read `AGENTS.md` first. It is the agent-facing source of truth for installation,
+configuration, resume/checkpoint usage, verification, and safety rules.
+
 ## Architecture
 
 ```text
@@ -72,9 +77,6 @@ Default local runtime:
 
 The Absurd SQL schema is fetched from a pinned upstream commit during setup when
 the target database does not already have the `absurd` schema.
-
-Coding agents working on this repo should also read `AGENTS.md` for the install,
-configuration, resume/checkpoint, verification, and safety protocol.
 
 Write a checkpoint:
 
