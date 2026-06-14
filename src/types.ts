@@ -5,6 +5,33 @@ export interface ContinuityConfig {
   queueName: string;
   checkpointDir: string;
   workerTimeoutSeconds: number;
+  home?: string;
+  configPath?: string;
+  databaseConfigured?: boolean;
+  runtime?: RuntimeConfig;
+}
+
+export interface StoredConfig {
+  version: 1;
+  databaseUrl: string;
+  queueName: string;
+  checkpointDir: string;
+  workerTimeoutSeconds?: number;
+  runtime?: RuntimeConfig;
+}
+
+export type RuntimeConfig = DockerRuntimeConfig;
+
+export interface DockerRuntimeConfig {
+  kind: "docker";
+  image: string;
+  containerName: string;
+  volumeName: string;
+  host: string;
+  port: number;
+  database: string;
+  user: string;
+  password: string;
 }
 
 export interface CheckpointInput {

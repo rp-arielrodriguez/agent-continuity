@@ -2,6 +2,14 @@
   "name": "agent-continuity",
   "version": "0.1.0",
   "description": "Durable checkpoint and resume state for coding agents, backed by Absurd and PostgreSQL.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rp-arielrodriguez/agent-continuity.git"
+  },
+  "homepage": "https://github.com/rp-arielrodriguez/agent-continuity#readme",
+  "bugs": {
+    "url": "https://github.com/rp-arielrodriguez/agent-continuity/issues"
+  },
   "type": "module",
   "bin": {
     "continuity": "./dist/src/cli.js"
@@ -13,7 +21,7 @@
     }
   },
   "files": [
-    "dist",
+    "dist/src",
     "integrations",
     "README.md",
     "LICENSE"

@@ -42,31 +42,36 @@ step. The database remains the source of truth; markdown is recoverable output.
 
 ## Quick Start
 
-Install dependencies and build:
+Install the CLI:
 
 ```bash
-npm install
-npm run build
+npm install -g agent-continuity
 ```
 
-Install the agent integrations:
+Set up the local runtime and integrations:
 
 ```bash
-continuity install --target all
+continuity setup --local
+continuity doctor
 ```
 
-The installer supports `--target opencode`, `--target claude`, `--target all`,
-`--dry-run`, and `--home <path>` for isolated testing. It writes the OpenCode
-plugin, registers it in `opencode.json`, installs Claude hook scripts, and adds
-the matching Claude `settings.json` hook entries. Restart the agent runtime after
-installing so config-time plugins/hooks are reloaded.
+`setup --local` is idempotent. It creates/reuses a Docker-managed PostgreSQL
+container and named volume, initializes Absurd and the `continuity.*` tables,
+writes `~/.config/agent-continuity/config.json`, and installs the OpenCode and
+Claude integrations. Re-running it should report existing/skipped resources
+rather than duplicating them.
 
-Point the CLI at an Absurd-initialized database:
+Default local runtime:
 
-```bash
-export CONTINUITY_DATABASE_URL="postgresql://postgres@127.0.0.1:5433/absurd_poc"
-export CONTINUITY_QUEUE="default"
-```
+- container: `agent-continuity-postgres`
+- volume: `agent-continuity-postgres-data`
+- host/port: `127.0.0.1:5433`
+- database: `agent_continuity`
+- user: `continuity`
+- password: generated and stored only in the local config file
+
+The Absurd SQL schema is fetched from a pinned upstream commit during setup when
+the target database does not already have the `absurd` schema.
 
 Write a checkpoint:
 
@@ -99,14 +104,31 @@ Inspect runtime state:
 continuity status
 ```
 
+Lifecycle helpers:
+
+```bash
+continuity start
+continuity stop
+continuity backup
+continuity uninstall          # keeps the Docker volume
+continuity uninstall --delete-data
+```
+
 ## Configuration
 
 | Variable | Default |
 | --- | --- |
-| `CONTINUITY_DATABASE_URL` | `ABSURD_DATABASE_URL`, then `postgresql://postgres@127.0.0.1:5433/absurd_poc` |
+| `CONTINUITY_DATABASE_URL` | Overrides `~/.config/agent-continuity/config.json` database URL |
 | `CONTINUITY_QUEUE` | `default` |
 | `CONTINUITY_CHECKPOINT_DIR` | `~/.config/opencode/checkpoints` |
 | `CONTINUITY_WORKER_TIMEOUT_SECONDS` | `30` |
+
+You can bypass the local config file with:
+
+```bash
+export CONTINUITY_DATABASE_URL="postgresql://..."
+export CONTINUITY_QUEUE="default"
+```
 
 ## Runtime Compatibility
 
@@ -121,6 +143,10 @@ For local development without publishing the package, create a user-local link:
 npm run build
 ln -sf "$PWD/dist/src/cli.js" ~/.local/bin/continuity
 ```
+
+The installer supports `--target opencode`, `--target claude`, `--target all`,
+`--dry-run`, and `--home <path>` for isolated testing. Restart the agent runtime
+after installing so config-time plugins/hooks are reloaded.
 
 ## Integrations
 
