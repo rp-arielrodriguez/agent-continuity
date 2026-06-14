@@ -49,6 +49,18 @@ npm install
 npm run build
 ```
 
+Install the agent integrations:
+
+```bash
+continuity install --target all
+```
+
+The installer supports `--target opencode`, `--target claude`, `--target all`,
+`--dry-run`, and `--home <path>` for isolated testing. It writes the OpenCode
+plugin, registers it in `opencode.json`, installs Claude hook scripts, and adds
+the matching Claude `settings.json` hook entries. Restart the agent runtime after
+installing so config-time plugins/hooks are reloaded.
+
 Point the CLI at an Absurd-initialized database:
 
 ```bash
@@ -95,6 +107,13 @@ continuity status
 | `CONTINUITY_QUEUE` | `default` |
 | `CONTINUITY_CHECKPOINT_DIR` | `~/.config/opencode/checkpoints` |
 | `CONTINUITY_WORKER_TIMEOUT_SECONDS` | `30` |
+
+## Runtime Compatibility
+
+- CLI: supported on Node.js 18+.
+- OpenCode integration: plain ESM JavaScript plugin for OpenCode's plugin loader.
+- Bun: not claimed yet. The plugin is ESM, but the CLI depends on `pg` and
+  `absurd-sdk`; run the test suite under Bun before treating it as supported.
 
 For local development without publishing the package, create a user-local link:
 

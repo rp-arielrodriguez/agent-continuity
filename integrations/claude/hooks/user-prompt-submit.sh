@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+input="$(cat || true)"
 prompt="${CLAUDE_USER_PROMPT:-}"
+
+if [[ -z "$prompt" && -n "$input" ]]; then
+  prompt="$(INPUT="$input" node -e '
+const input = process.env.INPUT || "{}";
+try {
+  const data = JSON.parse(input);
+  console.log(data.prompt || data.tool_input?.prompt || "");
+} catch {
+  console.log("");
+}
+' 2>/dev/null)"
+fi
 
 if [[ "$prompt" =~ ([Rr]esume|[Cc]ontinue)[[:space:]]+from[[:space:]]+([^[:space:]]+\.md) ]]; then
   file="${BASH_REMATCH[2]}"

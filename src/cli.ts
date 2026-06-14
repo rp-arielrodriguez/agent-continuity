@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { defaultCheckpointInput, loadConfig } from "./config.js";
+import { installAgentContinuity, type InstallTarget } from "./install.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 
 interface ParsedArgs {
@@ -99,6 +100,22 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       }
       return;
     }
+    case "install": {
+      const result = await installAgentContinuity({
+        target: (stringOption(parsed, "target") as InstallTarget | undefined) ?? "all",
+        home: stringOption(parsed, "home"),
+        dryRun: Boolean(parsed.options["dry-run"]),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`target: ${result.target}`);
+        for (const path of result.wrote) console.log(`wrote: ${path}`);
+        for (const path of result.skipped) console.log(`skipped: ${path}`);
+        for (const message of result.messages) console.log(message);
+        console.log("Restart OpenCode/Claude for integration changes to load.");
+      }
+      return;
+    }
     case "help":
     case "--help":
     case "-h":
@@ -146,12 +163,14 @@ function printHelp(): void {
 Commands:
   checkpoint  Append a journal entry and rewrite canon through Absurd
   import      Import existing markdown projection into PostgreSQL through Absurd
+  install     Install OpenCode and/or Claude integrations
   reconcile   Rewrite canon from --canon-file through Absurd
   resume      Print the canon for a task from PostgreSQL
   status      Show database-backed continuity state
 
 Examples:
   continuity checkpoint --task-id TASK --status completed --progress "Done" --next "Ship"
+  continuity install --target all
   continuity import --task-id TASK --journal-file ~/.config/opencode/checkpoints/TASK.md --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity reconcile --task-id TASK --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity resume --task-id TASK
