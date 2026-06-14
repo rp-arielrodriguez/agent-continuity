@@ -73,6 +73,9 @@ Default local runtime:
 The Absurd SQL schema is fetched from a pinned upstream commit during setup when
 the target database does not already have the `absurd` schema.
 
+Coding agents working on this repo should also read `AGENTS.md` for the install,
+configuration, resume/checkpoint, verification, and safety protocol.
+
 Write a checkpoint:
 
 ```bash

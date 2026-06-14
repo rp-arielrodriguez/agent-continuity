@@ -23,6 +23,7 @@
   "files": [
     "dist/src",
     "integrations",
+    "AGENTS.md",
     "README.md",
     "LICENSE"
   ],
