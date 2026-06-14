@@ -66,6 +66,10 @@ writes `~/.config/agent-continuity/config.json`, and installs the OpenCode and
 Claude integrations. Re-running it should report existing/skipped resources
 rather than duplicating them.
 
+If `~/.config/agent-continuity/config.json` already points at a database and no
+Docker options are passed, `setup --local` reuses and verifies that database
+instead of replacing the config.
+
 Default local runtime:
 
 - container: `agent-continuity-postgres`

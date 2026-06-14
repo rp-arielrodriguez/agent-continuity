@@ -25,6 +25,10 @@ continuity doctor
 container, initializes Absurd and the `continuity.*` tables, writes local config,
 and installs OpenCode and Claude integrations.
 
+If `~/.config/agent-continuity/config.json` already points at a database and no
+Docker options are passed, `setup --local` reuses and verifies that database
+instead of replacing the config.
+
 Restart OpenCode and Claude after setup or integration changes so plugins and
 hooks are reloaded.
 

@@ -45,11 +45,29 @@ export interface DoctorResult {
 }
 
 export async function setupLocal(options: SetupOptions = {}): Promise<SetupResult> {
+  const actions: ActionReport[] = [];
+  const existing = await readStoredConfig(options.home);
+  if (existing?.databaseUrl && !existing.runtime && !hasDockerOptions(options)) {
+    const storedConfig: StoredConfig = {
+      ...existing,
+      queueName: options.queueName ?? existing.queueName ?? "default",
+      checkpointDir: options.checkpointDir ?? existing.checkpointDir ?? "~/.config/opencode/checkpoints",
+      workerTimeoutSeconds: existing.workerTimeoutSeconds ?? 30,
+    };
+    const configChanged = JSON.stringify(existing) !== JSON.stringify(storedConfig);
+    const writtenConfigPath = configChanged ? await writeStoredConfig(storedConfig, options.home) : configPath(options.home);
+    actions.push({ name: "config", status: configChanged ? "updated" : "skipped", detail: writtenConfigPath });
+    await initializeDatabase(storedConfig.databaseUrl, storedConfig.queueName);
+    actions.push({ name: "postgres", status: "ok", detail: databaseDetail(storedConfig.databaseUrl) });
+    actions.push({ name: "absurd-schema", status: "ok" });
+    actions.push({ name: "continuity-schema", status: "ok" });
+    await installIntegrations(options, actions);
+    return { configPath: writtenConfigPath, databaseUrl: storedConfig.databaseUrl, actions };
+  }
+
   const runtimeKind = options.runtime ?? "docker";
   if (runtimeKind !== "docker") throw new Error(`unsupported setup runtime: ${runtimeKind}`);
 
-  const actions: ActionReport[] = [];
-  const existing = await readStoredConfig(options.home);
   const runtime = mergeRuntime(existing?.runtime?.kind === "docker" ? existing.runtime : undefined, options);
   const queueName = options.queueName ?? existing?.queueName ?? "default";
   const checkpointDir = options.checkpointDir ?? existing?.checkpointDir ?? "~/.config/opencode/checkpoints";
@@ -77,14 +95,18 @@ export async function setupLocal(options: SetupOptions = {}): Promise<SetupResul
   actions.push({ name: "absurd-schema", status: "ok" });
   actions.push({ name: "continuity-schema", status: "ok" });
 
+  await installIntegrations(options, actions);
+
+  return { configPath: writtenConfigPath, databaseUrl: storedConfig.databaseUrl, actions };
+}
+
+async function installIntegrations(options: SetupOptions, actions: ActionReport[]): Promise<void> {
   if (options.install ?? true) {
     const install = await installAgentContinuity({ home: options.home, target: "all" });
     actions.push({ name: "integrations", status: install.wrote.length > 0 ? "updated" : "skipped", detail: `${install.wrote.length} wrote, ${install.skipped.length} skipped` });
   } else {
     actions.push({ name: "integrations", status: "skipped", detail: "--no-install" });
   }
-
-  return { configPath: writtenConfigPath, databaseUrl: storedConfig.databaseUrl, actions };
 }
 
 export async function doctor(config: ContinuityConfig): Promise<DoctorResult> {
@@ -210,6 +232,19 @@ function mergeRuntime(existing: DockerRuntimeConfig | undefined, options: SetupO
     user: options.user ?? existing?.user,
     password: options.password ?? existing?.password,
   });
+}
+
+function hasDockerOptions(options: SetupOptions): boolean {
+  return Boolean(options.runtime ?? options.image ?? options.containerName ?? options.volumeName ?? options.host ?? options.port ?? options.database ?? options.user ?? options.password);
+}
+
+function databaseDetail(databaseUrl: string): string {
+  try {
+    const url = new URL(databaseUrl);
+    return `${url.hostname}:${url.port || "5432"}${url.pathname}`;
+  } catch {
+    return databaseUrl;
+  }
 }
 
 function dockerRuntime(config: ContinuityConfig): DockerRuntimeConfig {

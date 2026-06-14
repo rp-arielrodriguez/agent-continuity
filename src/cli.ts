@@ -20,7 +20,7 @@ async function main(argv: string[]): Promise<void> {
       if (parsed.options.local !== true) throw new Error("only local setup is supported: use continuity setup --local");
       const result = await setupLocal({
         home: stringOption(parsed, "home"),
-        runtime: (stringOption(parsed, "runtime") as "docker" | undefined) ?? "docker",
+        runtime: stringOption(parsed, "runtime") as "docker" | undefined,
         install: parsed.options["no-install"] !== true,
         image: stringOption(parsed, "image"),
         containerName: stringOption(parsed, "container-name"),
