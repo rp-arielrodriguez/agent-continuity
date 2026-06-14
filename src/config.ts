@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { CheckpointInput, CheckpointStatus, ContinuityConfig, DockerRuntimeConfig, StoredConfig } from "./types.js";
 
-const DEFAULT_DATABASE_URL = "postgresql://postgres@127.0.0.1:5433/absurd_poc";
+const DEFAULT_DATABASE_URL = "postgresql://postgres@127.0.0.1:5433/agent_continuity";
 const CONFIG_DIR = "~/.config/agent-continuity";
 const CONFIG_FILE = "config.json";
 
