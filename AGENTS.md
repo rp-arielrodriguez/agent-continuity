@@ -25,6 +25,11 @@ continuity doctor
 container, initializes Absurd and the `continuity.*` tables, writes local config,
 and installs OpenCode and Claude integrations.
 
+OpenCode must use the npm plugin entry (`"agent-continuity"` in `opencode.json`),
+not a copied `file://` plugin. OpenCode installs npm plugins into its own cache
+at startup; publish the package before relying on this mode outside local
+development.
+
 If `~/.config/agent-continuity/config.json` already points at a database and no
 Docker options are passed, `setup --local` reuses and verifies that database
 instead of replacing the config.

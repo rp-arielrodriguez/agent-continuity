@@ -184,6 +184,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       else {
         console.log(`target: ${result.target}`);
         for (const path of result.wrote) console.log(`wrote: ${path}`);
+        for (const path of result.removed) console.log(`removed: ${path}`);
         for (const path of result.skipped) console.log(`skipped: ${path}`);
         for (const message of result.messages) console.log(message);
         console.log("Restart OpenCode/Claude for integration changes to load.");

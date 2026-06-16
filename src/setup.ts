@@ -103,7 +103,7 @@ export async function setupLocal(options: SetupOptions = {}): Promise<SetupResul
 async function installIntegrations(options: SetupOptions, actions: ActionReport[]): Promise<void> {
   if (options.install ?? true) {
     const install = await installAgentContinuity({ home: options.home, target: "all" });
-    actions.push({ name: "integrations", status: install.wrote.length > 0 ? "updated" : "skipped", detail: `${install.wrote.length} wrote, ${install.skipped.length} skipped` });
+    actions.push({ name: "integrations", status: install.wrote.length > 0 || install.removed.length > 0 ? "updated" : "skipped", detail: `${install.wrote.length} wrote, ${install.removed.length} removed, ${install.skipped.length} skipped` });
   } else {
     actions.push({ name: "integrations", status: "skipped", detail: "--no-install" });
   }

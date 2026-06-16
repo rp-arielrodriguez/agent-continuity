@@ -11,6 +11,7 @@
     "url": "https://github.com/rp-arielrodriguez/agent-continuity/issues"
   },
   "type": "module",
+  "main": "./dist/src/index.js",
   "bin": {
     "continuity": "./dist/src/cli.js"
   },
@@ -18,11 +19,19 @@
     ".": {
       "types": "./dist/src/index.d.ts",
       "import": "./dist/src/index.js"
+    },
+    "./server": {
+      "types": "./dist/src/opencode.d.ts",
+      "import": "./dist/src/opencode.js"
+    },
+    "./sdk": {
+      "types": "./dist/src/sdk.d.ts",
+      "import": "./dist/src/sdk.js"
     }
   },
   "files": [
     "dist/src",
-    "integrations",
+    "integrations/claude",
     "AGENTS.md",
     "README.md",
     "LICENSE"

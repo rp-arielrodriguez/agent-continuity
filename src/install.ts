@@ -1,6 +1,6 @@
-import { chmod, copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { expandHome } from "./config.js";
 
 export type InstallTarget = "all" | "opencode" | "claude";
@@ -14,6 +14,7 @@ export interface InstallOptions {
 export interface InstallResult {
   target: InstallTarget;
   wrote: string[];
+  removed: string[];
   skipped: string[];
   messages: string[];
 }
@@ -34,14 +35,15 @@ type SettingsJson = Record<string, unknown> & {
   hooks?: Record<string, HookGroup[]>;
 };
 
-const OPENCODE_PLUGIN = "agent-continuity.js";
+const OPENCODE_PLUGIN_PACKAGE = "agent-continuity";
+const LEGACY_OPENCODE_PLUGIN = "agent-continuity.js";
 const CLAUDE_SESSION_HOOK = "agent-continuity-session-start.sh";
 const CLAUDE_PROMPT_HOOK = "agent-continuity-user-prompt-submit.sh";
 
 export async function installAgentContinuity(options: InstallOptions = {}): Promise<InstallResult> {
   const target = options.target ?? "all";
   const home = expandHome(options.home ?? "~");
-  const result: InstallResult = { target, wrote: [], skipped: [], messages: [] };
+  const result: InstallResult = { target, wrote: [], removed: [], skipped: [], messages: [] };
 
   if (target === "all" || target === "opencode") {
     await installOpenCode(home, result, options.dryRun ?? false);
@@ -56,25 +58,26 @@ export async function installAgentContinuity(options: InstallOptions = {}): Prom
 async function installOpenCode(home: string, result: InstallResult, dryRun: boolean): Promise<void> {
   const configDir = join(home, ".config", "opencode");
   const pluginDir = join(configDir, "plugins");
-  const pluginPath = join(pluginDir, OPENCODE_PLUGIN);
-  const pluginUrl = pathToFileURL(pluginPath).href;
+  const legacyPluginPath = join(pluginDir, LEGACY_OPENCODE_PLUGIN);
   const configPath = join(configDir, "opencode.json");
-  const packageJsonPath = join(pluginDir, "package.json");
 
-  await writeIfChanged(pluginPath, await readFile(templatePath("integrations/opencode/canon-plugin.js"), "utf8"), result, dryRun);
-  await writeIfChanged(packageJsonPath, '{\n  "type": "module"\n}\n', result, dryRun);
+  await removeIfExists(legacyPluginPath, result, dryRun);
 
   const config = await readJsonObject(configPath, { $schema: "https://opencode.ai/config.json" });
   const plugins = Array.isArray(config.plugin) ? [...config.plugin] : [];
-  if (!plugins.includes(pluginUrl)) {
-    plugins.push(pluginUrl);
-    config.plugin = plugins;
+  const nextPlugins = plugins.filter((plugin) => !isLegacyOpenCodePlugin(plugin));
+  if (!nextPlugins.includes(OPENCODE_PLUGIN_PACKAGE)) {
+    nextPlugins.push(OPENCODE_PLUGIN_PACKAGE);
+  }
+
+  if (JSON.stringify(plugins) !== JSON.stringify(nextPlugins)) {
+    config.plugin = nextPlugins;
     await writeJson(configPath, config, result, dryRun);
   } else {
     result.skipped.push(configPath);
   }
 
-  result.messages.push(`OpenCode plugin: ${pluginUrl}`);
+  result.messages.push(`OpenCode plugin: ${OPENCODE_PLUGIN_PACKAGE}`);
 }
 
 async function installClaude(home: string, result: InstallResult, dryRun: boolean): Promise<void> {
@@ -130,6 +133,18 @@ async function writeIfChanged(path: string, content: string, result: InstallResu
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, content, "utf8");
   if (mode !== undefined) await chmod(path, mode);
+}
+
+async function removeIfExists(path: string, result: InstallResult, dryRun: boolean): Promise<void> {
+  const current = await readExisting(path);
+  if (current === null) return;
+
+  result.removed.push(path);
+  if (!dryRun) await rm(path, { force: true });
+}
+
+function isLegacyOpenCodePlugin(value: unknown): boolean {
+  return typeof value === "string" && value.endsWith(`/${LEGACY_OPENCODE_PLUGIN}`);
 }
 
 async function readExisting(path: string): Promise<string | null> {

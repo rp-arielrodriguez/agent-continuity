@@ -1,36 +1,33 @@
-// OpenCode integration for agent-continuity.
-// Install this plugin after `continuity` is on PATH. It injects CLI-first rules;
-// the CLI, not this plugin, owns durable checkpoint writes.
 const ORIENT_RE = /\b(resume\s+from|continue\s+from|where\s+are\s+we|current\s+state|what(?:'|’)?s\s+the\s+state|what\s+did\s+we\s+do|d[oó]nde\s+estamos)\b/i;
 const CHECKPOINT_RE = /\b(checkpoint|dump\s+context|save\s+progress|document\s+state|guardar?\s+progreso|guard[aá])\b/i;
 const RESUME_FILE_RE = /\b(?:resume|continue)\s+from\s+`?([^`\s]+\.md)\b/i;
 
-function textFromParts(parts) {
-  return (parts || [])
-    .filter((part) => part && part.type === "text" && typeof part.text === "string")
+function textFromParts(parts: Array<{ type?: string; text?: string }> | undefined): string {
+  return (parts ?? [])
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n");
 }
 
-function taskHint(prompt) {
+function taskHint(prompt: string): string {
   const match = prompt.match(RESUME_FILE_RE);
   if (!match) return "";
-  const file = match[1].split("/").pop().replace(/^~/, "");
-  const taskID = file.endsWith(".canon.md") ? file.slice(0, -".canon.md".length) : file.slice(0, -".md".length);
-  return taskID ? ` Inferred task id: ${taskID}. Run: continuity resume --task-id ${taskID}` : "";
+  const file = match[1].split("/").pop()?.replace(/^~/, "") ?? "";
+  const taskId = file.endsWith(".canon.md") ? file.slice(0, -".canon.md".length) : file.slice(0, -".md".length);
+  return taskId ? ` Inferred task id: ${taskId}. Run: continuity resume --task-id ${taskId}` : "";
 }
 
 export const AgentContinuity = async () => {
-  const pendingBySession = new Map();
+  const pendingBySession = new Map<string, { orient: boolean; checkpoint: boolean; hint: string }>();
   return {
-    "chat.message": async (input, output) => {
+    "chat.message": async (input: { sessionID: string }, output: { parts?: Array<{ type?: string; text?: string }> }) => {
       const prompt = textFromParts(output.parts);
       const orient = ORIENT_RE.test(prompt);
       const checkpoint = CHECKPOINT_RE.test(prompt);
       if (orient || checkpoint) pendingBySession.set(input.sessionID, { orient, checkpoint, hint: taskHint(prompt) });
       else pendingBySession.delete(input.sessionID);
     },
-    "experimental.chat.system.transform": async (input, output) => {
+    "experimental.chat.system.transform": async (input: { sessionID?: string }, output: { system: string[] }) => {
       const trigger = input.sessionID ? pendingBySession.get(input.sessionID) : null;
       if (!trigger) return;
       if (trigger.orient) {
@@ -45,7 +42,7 @@ export const AgentContinuity = async () => {
         );
       }
     },
-    "experimental.session.compacting": async (_input, output) => {
+    "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
       output.context.push(
         "AGENT CONTINUITY: after compaction, write checkpoint state with `continuity checkpoint`. PostgreSQL/Absurd is the authority; markdown canon/journal files are projections.",
       );

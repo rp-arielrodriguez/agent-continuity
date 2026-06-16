@@ -66,6 +66,11 @@ writes `~/.config/agent-continuity/config.json`, and installs the OpenCode and
 Claude integrations. Re-running it should report existing/skipped resources
 rather than duplicating them.
 
+OpenCode is configured as an npm plugin (`"agent-continuity"` in
+`opencode.json`), not as a copied `file://` plugin. OpenCode installs npm
+plugins into its own cache at startup, so publish the package before using this
+mode outside local development.
+
 If `~/.config/agent-continuity/config.json` already points at a database and no
 Docker options are passed, `setup --local` reuses and verifies that database
 instead of replacing the config.
@@ -161,10 +166,10 @@ after installing so config-time plugins/hooks are reloaded.
 
 Integration templates live under `integrations/`.
 
-- OpenCode: `integrations/opencode/canon-plugin.js`
 - Claude: `integrations/claude/hooks/`
 
-They are intentionally small. Their job is to inject the rule that agents call
+The OpenCode plugin is exported from the npm package via `./server`. The Claude
+hooks are intentionally small. Their job is to inject the rule that agents call
 `continuity` for resume/checkpoint operations. The CLI and database own the
 durability guarantees.
 
