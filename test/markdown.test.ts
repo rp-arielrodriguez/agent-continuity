@@ -49,6 +49,19 @@ test("parses markdown journal entries for import", () => {
   assert.equal(entries[0].idempotencyKey, idempotencyKeyFor(input));
 });
 
+test("parses legacy journal headers with a title suffix", () => {
+  const journal = renderJournalEntry(input).replace(
+    "(session session-1)",
+    "(session session-1) — STEP-1 DEPLOYED",
+  );
+
+  const entries = parseJournalEntries("demo-task", journal);
+
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].sessionId, "session-1");
+  assert.equal(entries[0].entryMarkdown, journal);
+});
+
 test("extracts canon last-reconciled header", () => {
   assert.equal(lastReconciledFromCanon("# Canon: demo\n\nlast-reconciled: 2026-06-14T00:00:00Z\n"), "2026-06-14T00:00:00Z");
 });

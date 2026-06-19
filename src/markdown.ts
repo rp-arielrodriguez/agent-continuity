@@ -81,7 +81,7 @@ export function parseJournalEntries(taskId: string, journalMarkdown: string): Jo
 }
 
 function parseJournalBlock(taskId: string, block: string): JournalEntry {
-  const header = block.match(/^##\s+(\S+)\s+—\s+(.+?)\s+\(session\s+(.+?)\)\s*$/m);
+  const header = block.match(/^##\s+(\S+)\s+—\s+(.+?)\s+\(session\s+(.+?)\)(?:\s+—.*)?\s*$/m);
   if (!header) throw new Error(`invalid journal entry header for ${taskId}`);
 
   const input: CheckpointInput = {
