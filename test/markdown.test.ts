@@ -31,6 +31,12 @@ test("default canon marks database as source of truth", () => {
   assert.match(canon, /markdown is an exported projection/);
 });
 
+test("default canon marks daemon as source of truth for daemon checkpoints", () => {
+  const canon = renderDefaultCanon({ ...input, source: "daemon-cli" });
+  assert.match(canon, /Daemon continuity/);
+  assert.match(canon, /continuity resume --daemon --task-id demo-task/);
+});
+
 test("normalizes canon last-reconciled header", () => {
   const canon = withLastReconciled("# Canon: demo\n\nlast-reconciled: old\n", "2026-06-14T01:00:00.000Z");
   assert.match(canon, /last-reconciled: 2026-06-14T01:00:00\.000Z/);

@@ -14,7 +14,7 @@ function taskHint(prompt: string): string {
   if (!match) return "";
   const file = match[1].split("/").pop()?.replace(/^~/, "") ?? "";
   const taskId = file.endsWith(".canon.md") ? file.slice(0, -".canon.md".length) : file.slice(0, -".md".length);
-  return taskId ? ` Inferred task id: ${taskId}. Run: continuity resume --task-id ${taskId}` : "";
+  return taskId ? ` Inferred task id: ${taskId}. Run: continuity resume --daemon --task-id ${taskId}` : "";
 }
 
 export const AgentContinuity = async () => {
@@ -32,19 +32,19 @@ export const AgentContinuity = async () => {
       if (!trigger) return;
       if (trigger.orient) {
         output.system.push(
-          "AGENT CONTINUITY: resume/orient via the database authority first. Run `continuity resume --task-id <TASK-ID>` before reading markdown projections. Markdown under ~/.config/opencode/checkpoints is compatibility output, not the authority." +
+          "AGENT CONTINUITY: resume/orient via daemon continuity first. Run `continuity resume --daemon --task-id <TASK-ID>` before reading markdown projections; it infers project id from the current git remote unless `--project-id` is provided. If the daemon is unavailable, fall back to `continuity resume --task-id <TASK-ID>` from PostgreSQL compatibility state. Markdown under ~/.config/opencode/checkpoints is compatibility output, not the authority." +
             trigger.hint,
         );
       }
       if (trigger.checkpoint) {
         output.system.push(
-          "AGENT CONTINUITY: checkpoint through Absurd. Do not edit checkpoint markdown directly as the authority. Build the semantic journal/canon content, then run `continuity checkpoint --task-id <TASK-ID> --status <status> --progress <summary> --next <next>`; pass `--canon-file` when you have a reconciled canon.",
+          "AGENT CONTINUITY: checkpoint through daemon continuity. Do not edit checkpoint markdown directly as the authority. Build the semantic checkpoint/canon content, then run `continuity checkpoint --daemon --task-id <TASK-ID> --status <status> --progress <summary> --next <next>`; pass `--canon-file` when you have a reconciled canon. If the daemon is unavailable, fall back to PostgreSQL compatibility with the same command without `--daemon`.",
         );
       }
     },
     "experimental.session.compacting": async (_input: unknown, output: { context: string[] }) => {
       output.context.push(
-        "AGENT CONTINUITY: after compaction, write checkpoint state with `continuity checkpoint`. PostgreSQL/Absurd is the authority; markdown canon/journal files are projections.",
+        "AGENT CONTINUITY: after compaction, write checkpoint state with `continuity checkpoint --daemon`. Daemon continuity is the preferred authority; PostgreSQL/Absurd remains compatibility fallback; markdown canon/journal files are projections.",
       );
     },
   };

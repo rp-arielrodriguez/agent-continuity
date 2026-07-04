@@ -36,6 +36,32 @@ agent -> continuity CLI -> Absurd task -> PostgreSQL continuity tables
                                 +-> markdown projection
 ```
 
+The product-grade decentralized runtime direction is documented in
+[`docs/decentralized-runtime.md`](docs/decentralized-runtime.md). The daemon
+runtime now provides the provider-first path: signed task blocks, project/task
+and lane state, lease validation, peer sync, dashboard rendering, and a migration
+bridge from the existing PostgreSQL/Absurd state.
+
+The SDK pieces are available from `agent-continuity/sdk`: signed task blocks,
+the transition validation contract, `MemoryProvider`, the persistent
+SQLite-backed `SQLiteProvider`, durable node signer storage, and
+`LocalDaemonProvider`. `LocalDaemonProvider` talks to `continuityd` over
+JSON-RPC on a Unix socket, exposes explicit peer sync via `syncPeers`, trusted
+address-book sync via `syncTrustedPeers`, durable peer trust management, signed
+peer invites, signed rendezvous presence, local mDNS/DNS-SD discovery, and
+optional Tailscale/ZeroTier candidate discovery via `discoverPeers`.
+`migratePostgresTaskToProvider` migrates existing PostgreSQL/Absurd journal and
+canon state into signed task blocks.
+
+The Go daemon lives under `daemon/`; it exposes the local SQLite store over
+JSON-RPC on a Unix socket and can optionally serve a read-only TCP peer listener
+with `continuityd --peer-listen <host:port>`.
+`continuity dashboard --project-id <PROJECT> --task-id <TASK>` renders a
+tmux-friendly lane snapshot from the local daemon.
+`continuity daemon-install` builds or updates the local `continuityd` binary
+from the packaged Go source; `--launchd` writes a macOS launch agent plist
+without loading it implicitly.
+
 The durable task has three checkpointed steps:
 
 1. `append-journal`: insert an idempotent journal entry into Postgres.
@@ -53,18 +79,49 @@ Install the CLI:
 npm install -g agent-continuity
 ```
 
-Set up the local runtime and integrations:
+Install the local runtime, integrations, and daemon:
 
 ```bash
-continuity setup --local
+continuity install
 continuity doctor
 ```
 
-`setup --local` is idempotent. It creates/reuses a Docker-managed PostgreSQL
-container and named volume, initializes Absurd and the `continuity.*` tables,
-writes `~/.config/agent-continuity/config.json`, and installs the OpenCode and
-Claude integrations. Re-running it should report existing/skipped resources
-rather than duplicating them.
+`continuity install` is idempotent. It creates/reuses a Docker-managed
+PostgreSQL container and named volume, initializes Absurd and the
+`continuity.*` tables, writes `~/.config/agent-continuity/config.json`, installs
+the OpenCode and Claude integrations, builds `~/.local/bin/continuityd`, starts
+the daemon, and reports doctor checks. Re-running it should report
+existing/skipped resources rather than duplicating them.
+
+Install and migrate an existing task into the daemon-backed block store:
+
+```bash
+continuity install \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main
+```
+
+Install only agent integrations, without touching the runtime:
+
+```bash
+continuity install --target all
+continuity install --target opencode
+continuity install --target claude
+```
+
+Uninstall local artifacts:
+
+```bash
+continuity uninstall
+continuity uninstall --delete-data
+```
+
+Default uninstall stops the daemon, removes integrations, removes config,
+removes the Docker container, and keeps data. `--delete-data` also removes the
+Docker volume and default daemon state directory. The CLI binary itself is owned
+by npm or your local development symlink and is not removed by `continuity
+uninstall`.
 
 OpenCode is configured as an npm plugin (`"agent-continuity"` in
 `opencode.json`), not as a copied `file://` plugin. OpenCode installs npm
@@ -74,6 +131,18 @@ mode outside local development.
 If `~/.config/agent-continuity/config.json` already points at a database and no
 Docker options are passed, `setup --local` reuses and verifies that database
 instead of replacing the config.
+
+Lower-level setup remains available when you need direct control:
+
+```bash
+continuity setup --local --daemon
+continuity setup --local --daemon --daemon-launchd --daemon-peer-listen 100.64.0.2:9987
+```
+
+`--daemon` builds `continuityd`, writes daemon paths into the local config, and
+keeps PostgreSQL configured as the compatibility source for legacy
+checkpoint/resume operations. `--daemon-launchd` also writes a macOS launch
+agent plist; it does not load it implicitly.
 
 Default local runtime:
 
@@ -87,7 +156,76 @@ Default local runtime:
 The Absurd SQL schema is fetched from a pinned upstream commit during setup when
 the target database does not already have the `absurd` schema.
 
-Write a checkpoint:
+Write and resume daemon-backed continuity state:
+
+```bash
+continuity checkpoint \
+  --daemon \
+  --task-id agent-continuity-decentralized-runtime \
+  --status completed \
+  --progress "Daemon-backed checkpoint write succeeded." \
+  --next "Continue from daemon canon."
+
+continuity resume --daemon --task-id agent-continuity-decentralized-runtime
+```
+
+`--project-id` is optional inside a git checkout with `remote.origin.url`; the
+CLI infers `<owner>/<repo>`. Use `--project-id <OWNER>/<REPO>` outside a git
+checkout or when the inferred project is not the desired continuity namespace.
+
+Resume the same task from another trusted machine:
+
+```bash
+# On the machine that has useful task state, expose a read-only peer listener.
+continuity daemon-start --peer-listen :9987
+
+# Recommended one-peer bootstrap: create a signed invite on the source machine.
+continuity peer-invite-create \
+  --endpoint tcp://10.44.110.222:9987 \
+  --name ariel-main \
+  --provider zerotier
+
+# Accept that invite once on the machine that wants to resume the task.
+continuity peer-invite-accept --invite 'continuity://peer?...'
+
+# Pull blocks from trusted peers before printing the daemon canon.
+continuity resume \
+  --daemon \
+  --sync \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime
+```
+
+`peer-add`, `peer-list`, `peer-remove`, and `peer-sync` operate on the local
+daemon address book. Signed invite, signed rendezvous presence, and mDNS are the
+provider-agnostic onboarding paths:
+
+```bash
+# Shared directory, git checkout, bucket mount, NAS path, or private VPS path.
+continuity presence-publish \
+  --rendezvous /shared/continuity \
+  --port 9987 \
+  --project-id rp-arielrodriguez/agent-continuity
+
+continuity presence-discover \
+  --rendezvous /shared/continuity \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --trusted-node-ids <NODE_ID> \
+  --add
+
+# Local network discovery when DNS-SD is available.
+continuity mdns-advertise --port 9987 --name ariel-main
+continuity mdns-discover --trusted-names ariel-main --add
+```
+
+`peer-discover --peer-port <PORT> --trusted-names <NAME> --add` remains an
+optional convenience resolver for Tailscale/ZeroTier local state. It is not the
+core trust or discovery model. The trust decision stays local and explicit, and
+bulk `--add` requires a trusted name or node-id filter. Remote peer listeners are
+read-only; all writes still go through the local Unix socket and signed-block
+validation.
+
+Compatibility PostgreSQL checkpoint/resume remains available:
 
 ```bash
 continuity checkpoint \
@@ -106,11 +244,48 @@ continuity reconcile \
   --canon-file ~/.config/opencode/checkpoints/agent-continuity-absurd.canon.md
 ```
 
-Resume from the database authority:
+Resume from the PostgreSQL compatibility authority:
 
 ```bash
 continuity resume --task-id agent-continuity-absurd
 ```
+
+Render a daemon-backed lane dashboard:
+
+```bash
+continuity dashboard \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main
+```
+
+Build or update the local daemon binary:
+
+```bash
+continuity daemon-install
+continuity daemon-install --dry-run --launchd --peer-listen 100.64.0.2:9987
+```
+
+Run the daemon-backed daily path:
+
+```bash
+continuity daemon-start
+continuity daemon-status
+continuity daemon-migrate \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main
+continuity dashboard \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main
+continuity daemon-stop
+```
+
+By default the daemon socket is `<stateDir>/continuityd.sock`. If that path
+would exceed the Unix socket path limit, the CLI deterministically falls back to
+a short `/tmp/continuityd-<hash>.sock` path and prints the chosen socket in
+`daemon-install`, `daemon-status`, and lifecycle output.
 
 Inspect runtime state:
 
@@ -166,18 +341,21 @@ after installing so config-time plugins/hooks are reloaded.
 
 Integration templates live under `integrations/`.
 
-- Claude: `integrations/claude/hooks/`
+- Claude: `integrations/claude/hooks/` prompt-submit hook
 
 The OpenCode plugin is exported from the npm package via `./server`. The Claude
-hooks are intentionally small. Their job is to inject the rule that agents call
-`continuity` for resume/checkpoint operations. The CLI and database own the
-durability guarantees.
+hook is intentionally small. Its job is to inject the rule that agents call
+`continuity` for resume/checkpoint operations when the user prompt asks for that
+workflow. The CLI and database own the durability guarantees.
 
 ## Development
 
 ```bash
 npm run type-check
 npm test
+npm run build:daemon
+cd daemon && go test ./...
+npm run test:e2e
 ```
 
 Database-backed integration checks are skipped unless

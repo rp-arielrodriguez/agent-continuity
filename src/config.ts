@@ -58,6 +58,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ContinuityConf
     configPath: file,
     databaseConfigured: Boolean(databaseUrl),
     runtime: stored?.runtime,
+    daemon: stored?.daemon,
   };
 }
 

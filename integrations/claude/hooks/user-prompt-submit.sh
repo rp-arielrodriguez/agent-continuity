@@ -22,12 +22,14 @@ if [[ "$prompt" =~ ([Rr]esume|[Cc]ontinue)[[:space:]]+from[[:space:]]+([^[:space
   task_id="${base%.md}"
   task_id="${task_id%.canon}"
   cat <<MSG
-AGENT CONTINUITY: resume from PostgreSQL first, then use markdown only as a projection.
-Run: continuity resume --task-id $task_id
+AGENT CONTINUITY: resume from daemon continuity first, then use markdown only as a projection.
+Run: continuity resume --daemon --task-id $task_id
+Fallback if daemon is unavailable: continuity resume --task-id $task_id
 MSG
 elif [[ "$prompt" =~ checkpoint|dump[[:space:]]+context|save[[:space:]]+progress ]]; then
   cat <<'MSG'
-AGENT CONTINUITY: checkpoint through Absurd/PostgreSQL. Do not edit markdown checkpoint files as the authority.
-Run continuity checkpoint with --task-id, --status, --progress, --next, and --canon-file when a reconciled canon is available.
+AGENT CONTINUITY: checkpoint through daemon continuity. Do not edit markdown checkpoint files as the authority.
+Run continuity checkpoint --daemon with --task-id, --status, --progress, --next, and --canon-file when a reconciled canon is available.
+Fallback if daemon is unavailable: run the same checkpoint command without --daemon for PostgreSQL compatibility.
 MSG
 fi

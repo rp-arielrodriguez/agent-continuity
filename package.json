@@ -1,7 +1,7 @@
 {
   "name": "agent-continuity",
   "version": "0.1.0",
-  "description": "Durable checkpoint and resume state for coding agents, backed by Absurd and PostgreSQL.",
+  "description": "Local-first checkpoint and task continuity runtime for coding agents.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/rp-arielrodriguez/agent-continuity.git"
@@ -30,7 +30,9 @@
     }
   },
   "files": [
+    "daemon",
     "dist/src",
+    "docs",
     "integrations/claude",
     "AGENTS.md",
     "README.md",
@@ -38,8 +40,11 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:all": "npm run build && npm run build:daemon",
+    "build:daemon": "mkdir -p dist/bin && cd daemon && go build -o ../dist/bin/continuityd ./cmd/continuityd",
     "prepare": "npm run build",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:e2e": "npm run build:all && node --test dist/test/e2e/*.test.js",
     "type-check": "tsc --noEmit -p tsconfig.json"
   },
   "keywords": [
@@ -57,9 +62,11 @@
   },
   "dependencies": {
     "absurd-sdk": "^0.4.0",
+    "better-sqlite3": "^11.10.0",
     "pg": "^8.21.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "typescript": "^5.9.3"

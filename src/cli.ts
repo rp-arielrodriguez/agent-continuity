@@ -1,10 +1,35 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { defaultCheckpointInput, loadConfig, maskDatabaseUrl } from "./config.js";
+import { loadDashboardSnapshot, renderDashboard } from "./dashboard.js";
+import { daemonStatus, startDaemon, stopDaemon } from "./daemon-lifecycle.js";
+import { defaultDaemonRuntimeConfig, installDaemonRuntime } from "./daemon-install.js";
+import { LocalDaemonProvider, type OverlayDiscoveryProvider } from "./daemon-provider.js";
+import { readDaemonCanon, runDaemonCheckpoint } from "./daemon-workflow.js";
 import { installAgentContinuity, type InstallTarget } from "./install.js";
-import { backupRuntime, doctor, setupLocal, startRuntime, stopRuntime, uninstallRuntime, type ActionReport } from "./setup.js";
+import { migratePostgresTaskToProvider } from "./migration.js";
+import {
+  advertiseMdnsPresence,
+  createPeerInvite,
+  createPeerPresence,
+  decodePeerInvite,
+  defaultMdnsEndpoint,
+  defaultPresenceName,
+  discoverMdnsPeers,
+  discoverRendezvousPeers,
+  encodePeerInvite,
+  peerTrustInputFromDiscovery,
+  peerTrustInputFromInvite,
+  publishRendezvousPresence,
+  requireTrustedFilterForAdd,
+  type DiscoveryFilter,
+  type DiscoveredOnboardingPeer,
+} from "./peer-onboarding.js";
+import { inferProjectId } from "./project.js";
+import { loadOrCreateNodeSigner } from "./signer-store.js";
+import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
-import type { ContinuityConfig } from "./types.js";
+import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
 
 interface ParsedArgs {
   command: string;
@@ -32,6 +57,9 @@ async function main(argv: string[]): Promise<void> {
         password: stringOption(parsed, "password"),
         queueName: stringOption(parsed, "queue"),
         checkpointDir: stringOption(parsed, "checkpoint-dir"),
+        daemon: parsed.options.daemon === true,
+        daemonLaunchd: parsed.options["daemon-launchd"] === true,
+        daemonPeerListen: stringOption(parsed, "daemon-peer-listen"),
       });
       if (parsed.options.json) console.log(JSON.stringify({ ...result, databaseUrl: maskDatabaseUrl(result.databaseUrl) }, null, 2));
       else {
@@ -43,7 +71,6 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     case "checkpoint": {
-      requireDatabaseConfig(config);
       const canonFile = stringOption(parsed, "canon-file");
       const input = defaultCheckpointInput({
         taskId: stringOption(parsed, "task-id"),
@@ -57,8 +84,40 @@ async function main(argv: string[]): Promise<void> {
         next: stringOption(parsed, "next"),
         canonMarkdown: canonFile ? await readFile(canonFile, "utf8") : stringOption(parsed, "canon"),
         checkpointDir: stringOption(parsed, "checkpoint-dir"),
-        source: stringOption(parsed, "source") ?? "cli",
+        source: stringOption(parsed, "source") ?? (parsed.options.daemon === true ? "daemon-cli" : "cli"),
       });
+      if (parsed.options.daemon === true) {
+        const daemon = daemonRuntimeFromOptions(parsed, config);
+        const projectId = await projectIdOption(parsed);
+        const result = await runDaemonCheckpoint({
+          ...input,
+          projectId,
+          laneId: stringOption(parsed, "lane-id") ?? "main",
+          provider: new LocalDaemonProvider({ socketPath: daemon.socketPath, timeoutMs: numberOption(parsed, "timeout-ms") }),
+          stateDir: daemon.stateDir,
+          keyFile: stringOption(parsed, "key-file"),
+          nodeId: stringOption(parsed, "node-id"),
+          actorId: stringOption(parsed, "actor-id"),
+          leaseUntil: stringOption(parsed, "lease-until"),
+        });
+        if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+        else {
+          console.log(`<checkpoint>
+Status: ${result.appended ? "Accepted daemon checkpoint block" : "Daemon checkpoint block already existed"}
+Provider: daemon
+Project: ${result.projectId}
+Task: ${result.taskId}
+Lane: ${result.laneId}
+Block: ${result.blockId ?? "<none>"}
+Tip: ${result.finalTip ?? "<empty>"}
+Actor: ${result.actor.nodeId}/${result.actor.actorId}
+Summary: ${input.progress}
+</checkpoint>`);
+        }
+        return;
+      }
+
+      requireDatabaseConfig(config);
       const result = await runCheckpoint(input, config);
       if (parsed.options.json) {
         console.log(JSON.stringify(result, null, 2));
@@ -73,8 +132,26 @@ Summary: ${input.progress}
       return;
     }
     case "resume": {
-      requireDatabaseConfig(config);
       const taskId = requiredOption(parsed, "task-id");
+      if (parsed.options.daemon === true) {
+        const daemon = daemonRuntimeFromOptions(parsed, config);
+        const provider = new LocalDaemonProvider({ socketPath: daemon.socketPath, timeoutMs: numberOption(parsed, "timeout-ms") });
+        const ref = {
+          projectId: await projectIdOption(parsed),
+          taskId,
+          laneId: stringOption(parsed, "lane-id") ?? "main",
+        };
+        const sync = parsed.options.sync === true ? await provider.syncTrustedPeers(ref) : undefined;
+        const result = await readDaemonCanon({
+          ...ref,
+          provider,
+        });
+        if (!result.canonMarkdown) throw new Error(`no daemon canon found for ${result.projectId}/${result.taskId}/${result.laneId}`);
+        if (parsed.options.json) console.log(JSON.stringify({ ...result, sync }, null, 2));
+        else console.log(result.canonMarkdown.endsWith("\n") ? result.canonMarkdown.trimEnd() : result.canonMarkdown);
+        return;
+      }
+      requireDatabaseConfig(config);
       const canon = await readCanon(taskId, config);
       if (!canon) throw new Error(`no canon found for task ${taskId}`);
       console.log(canon.endsWith("\n") ? canon.trimEnd() : canon);
@@ -133,6 +210,339 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       }
       return;
     }
+    case "dashboard": {
+      const projectId = requiredOption(parsed, "project-id");
+      const taskId = requiredOption(parsed, "task-id");
+      const laneId = stringOption(parsed, "lane-id") ?? "main";
+      const actorNodeId = stringOption(parsed, "actor-node-id");
+      const actorId = stringOption(parsed, "actor-id");
+      if ((actorNodeId && !actorId) || (!actorNodeId && actorId)) {
+        throw new Error("--actor-node-id and --actor-id must be provided together");
+      }
+
+      const recentLimit = numberOption(parsed, "recent");
+      if (recentLimit !== undefined && recentLimit <= 0) throw new Error("--recent must be greater than zero");
+
+      const trustedNames = listOption(parsed, "trusted-names");
+      const trustedNodeIds = listOption(parsed, "trusted-node-ids");
+      const providers = discoveryProviders(parsed);
+      const peerPort = numberOption(parsed, "peer-port");
+      const discoveryRequested = peerPort !== undefined || trustedNames.length > 0 || trustedNodeIds.length > 0 || providers.length > 0;
+      if (discoveryRequested && peerPort === undefined) {
+        throw new Error("--peer-port is required when discovery options are provided");
+      }
+      if (peerPort !== undefined && trustedNames.length === 0 && trustedNodeIds.length === 0) {
+        throw new Error("--peer-port requires --trusted-names or --trusted-node-ids");
+      }
+
+      const provider = new LocalDaemonProvider({
+        socketPath: stringOption(parsed, "socket"),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
+      const snapshot = await loadDashboardSnapshot(provider, {
+        projectId,
+        taskId,
+        laneId,
+        actor: actorNodeId && actorId ? { nodeId: actorNodeId, actorId } : undefined,
+        now: stringOption(parsed, "now"),
+        recentLimit,
+        discovery:
+          peerPort === undefined
+            ? undefined
+            : {
+                port: peerPort,
+                providers: providers.length > 0 ? providers : undefined,
+                trustedNames: trustedNames.length > 0 ? trustedNames : undefined,
+                trustedNodeIds: trustedNodeIds.length > 0 ? trustedNodeIds : undefined,
+              },
+      });
+
+      if (parsed.options.json) console.log(JSON.stringify(snapshot, null, 2));
+      else console.log(renderDashboard(snapshot).trimEnd());
+      return;
+    }
+    case "peer-add": {
+      const provider = localDaemonProvider(parsed, config);
+      const peer = await provider.trustPeer({
+        endpoint: requiredOption(parsed, "endpoint"),
+        nodeId: stringOption(parsed, "node-id"),
+        name: stringOption(parsed, "name"),
+        publicKey: stringOption(parsed, "public-key"),
+        provider: stringOption(parsed, "provider"),
+        enabled: parsed.options.disabled === true ? false : true,
+        now: stringOption(parsed, "now"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(peer, null, 2));
+      else {
+        console.log(`peer: ${peer.endpoint}`);
+        console.log(`status: ${peer.enabled ? "enabled" : "disabled"}`);
+        if (peer.name) console.log(`name: ${peer.name}`);
+        if (peer.nodeId) console.log(`nodeId: ${peer.nodeId}`);
+        if (peer.provider) console.log(`provider: ${peer.provider}`);
+      }
+      return;
+    }
+    case "peer-list": {
+      const result = await localDaemonProvider(parsed, config).listTrustedPeers({
+        includeDisabled: parsed.options["include-disabled"] === true,
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else if (result.peers.length === 0) console.log("trusted peers: none");
+      else {
+        for (const peer of result.peers) {
+          const labels = [peer.enabled ? "enabled" : "disabled", peer.provider, peer.name, peer.nodeId].filter(Boolean).join(", ");
+          console.log(`${peer.endpoint}${labels ? ` (${labels})` : ""}`);
+        }
+      }
+      return;
+    }
+    case "peer-remove": {
+      const result = await localDaemonProvider(parsed, config).removeTrustedPeer({
+        endpoint: requiredOption(parsed, "endpoint"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`peer: ${result.removed ? "removed" : "missing"} (${result.endpoint})`);
+      return;
+    }
+    case "peer-sync": {
+      const result = await localDaemonProvider(parsed, config).syncTrustedPeers({
+        projectId: await projectIdOption(parsed),
+        taskId: requiredOption(parsed, "task-id"),
+        laneId: stringOption(parsed, "lane-id") ?? "main",
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else printPeerSyncResult(result);
+      return;
+    }
+    case "peer-invite-create": {
+      const signer = await signerFromOptions(parsed, config, "peer-invite-cli");
+      const invite = await createPeerInvite(
+        {
+          endpoint: requiredOption(parsed, "endpoint"),
+          provider: stringOption(parsed, "provider"),
+          name: stringOption(parsed, "name") ?? defaultPresenceName(),
+          projects: projectListOption(parsed),
+          expiresAt: stringOption(parsed, "expires-at"),
+          createdAt: stringOption(parsed, "now"),
+        },
+        signer.signer,
+      );
+      const url = encodePeerInvite(invite);
+      if (parsed.options.json) console.log(JSON.stringify({ invite, url, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else console.log(url);
+      return;
+    }
+    case "peer-invite-accept": {
+      const invite = decodePeerInvite(requiredOption(parsed, "invite"));
+      const trusted = await localDaemonProvider(parsed, config).trustPeer(peerTrustInputFromInvite(invite));
+      if (parsed.options.json) console.log(JSON.stringify({ invite, trusted }, null, 2));
+      else {
+        console.log(`peer: ${trusted.endpoint}`);
+        console.log(`nodeId: ${trusted.nodeId ?? invite.nodeId}`);
+        if (trusted.name) console.log(`name: ${trusted.name}`);
+        console.log(`provider: ${trusted.provider ?? invite.provider ?? "invite"}`);
+      }
+      return;
+    }
+    case "presence-publish": {
+      const signer = await signerFromOptions(parsed, config, "presence-cli");
+      const presence = await createPeerPresence(
+        {
+          endpoints: publishEndpointListOption(parsed).map((endpoint) => ({ endpoint, provider: stringOption(parsed, "provider") })),
+          name: stringOption(parsed, "name") ?? defaultPresenceName(),
+          projects: projectListOption(parsed),
+          expiresAt: stringOption(parsed, "expires-at"),
+          updatedAt: stringOption(parsed, "now"),
+        },
+        signer.signer,
+      );
+      const file = await publishRendezvousPresence({ rendezvous: requiredOption(parsed, "rendezvous"), presence });
+      if (parsed.options.json) console.log(JSON.stringify({ file, presence, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`presence: ${file}`);
+        console.log(`nodeId: ${presence.nodeId}`);
+        for (const endpoint of presence.endpoints) console.log(`endpoint: ${endpoint.endpoint}${endpoint.provider ? ` (${endpoint.provider})` : ""}`);
+      }
+      return;
+    }
+    case "presence-discover": {
+      const filter = discoveryFilterOption(parsed);
+      if (parsed.options.add === true) requireTrustedFilterForAdd(filter);
+      const result = await discoverRendezvousPeers({
+        rendezvous: requiredOption(parsed, "rendezvous"),
+        filter,
+      });
+      const trusted = parsed.options.add === true ? await trustDiscoveredPeers(parsed, config, result.peers) : [];
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, trusted }, null, 2));
+      else printOnboardingDiscovery("rendezvous", result.peers, result.warnings, trusted.length);
+      return;
+    }
+    case "mdns-advertise": {
+      const signer = await signerFromOptions(parsed, config, "mdns-cli");
+      const presence = await createPeerPresence(
+        {
+          endpoints: [{ endpoint: mdnsEndpointOption(parsed), provider: stringOption(parsed, "provider") ?? "mdns" }],
+          name: stringOption(parsed, "name") ?? defaultPresenceName(),
+          projects: projectListOption(parsed),
+          expiresAt: stringOption(parsed, "expires-at"),
+          updatedAt: stringOption(parsed, "now"),
+        },
+        signer.signer,
+      );
+      if (parsed.options.json) {
+        console.log(JSON.stringify({ presence, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+        return;
+      }
+      await advertiseMdnsPresence({ presence, durationMs: numberOption(parsed, "duration-ms") });
+      return;
+    }
+    case "mdns-discover": {
+      const filter = discoveryFilterOption(parsed);
+      if (parsed.options.add === true) requireTrustedFilterForAdd(filter);
+      const result = await discoverMdnsPeers({
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+        filter,
+      });
+      const trusted = parsed.options.add === true ? await trustDiscoveredPeers(parsed, config, result.peers) : [];
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, trusted }, null, 2));
+      else printOnboardingDiscovery("mDNS", result.peers, result.warnings, trusted.length);
+      return;
+    }
+    case "peer-discover": {
+      const peerPort = numberOption(parsed, "peer-port");
+      if (peerPort === undefined) throw new Error("--peer-port is required");
+      const trustedNames = listOption(parsed, "trusted-names");
+      const trustedNodeIds = listOption(parsed, "trusted-node-ids");
+      if (trustedNames.length === 0 && trustedNodeIds.length === 0) {
+        throw new Error("--peer-port requires --trusted-names or --trusted-node-ids");
+      }
+      const providers = discoveryProviders(parsed);
+      const provider = localDaemonProvider(parsed, config);
+      const discovery = await provider.discoverPeers({
+        port: peerPort,
+        providers: providers.length > 0 ? providers : undefined,
+        trustedNames: trustedNames.length > 0 ? trustedNames : undefined,
+        trustedNodeIds: trustedNodeIds.length > 0 ? trustedNodeIds : undefined,
+      });
+      const trusted = parsed.options.add === true
+        ? await Promise.all(discovery.peers.map((peer) => provider.trustPeer({
+            endpoint: peer.endpoint,
+            nodeId: peer.nodeId,
+            name: peer.name,
+            provider: peer.provider,
+          })))
+        : [];
+      if (parsed.options.json) console.log(JSON.stringify({ ...discovery, trusted }, null, 2));
+      else {
+        if (discovery.peers.length === 0) console.log("discovered peers: none");
+        for (const peer of discovery.peers) {
+          const labels = [peer.provider, peer.name, peer.nodeId, peer.online ? "online" : "offline"].filter(Boolean).join(", ");
+          console.log(`${peer.endpoint}${labels ? ` (${labels})` : ""}`);
+        }
+        for (const warning of discovery.warnings ?? []) console.log(`warning: ${warning}`);
+        if (trusted.length > 0) console.log(`trusted: ${trusted.length}`);
+      }
+      return;
+    }
+    case "daemon-install": {
+      const launchd = parsed.options.launchd === true;
+      const peerListen = stringOption(parsed, "peer-listen");
+      if (launchd && process.platform !== "darwin") throw new Error("--launchd is only supported on macOS");
+      if (peerListen && !launchd) throw new Error("--peer-listen requires --launchd");
+
+      const result = await installDaemonRuntime({
+        home: stringOption(parsed, "home"),
+        packageRoot: stringOption(parsed, "package-root"),
+        binaryPath: stringOption(parsed, "output"),
+        stateDir: stringOption(parsed, "state-dir"),
+        socketPath: stringOption(parsed, "socket"),
+        dbPath: stringOption(parsed, "db"),
+        launchd,
+        launchdLabel: stringOption(parsed, "launchd-label"),
+        launchdPlistPath: stringOption(parsed, "launchd-plist"),
+        peerListen,
+        dryRun: parsed.options["dry-run"] === true,
+      });
+
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`binary: ${result.binaryPath}`);
+        console.log(`stateDir: ${result.stateDir}`);
+        console.log(`socket: ${result.socketPath}`);
+        console.log(`database: ${result.dbPath}`);
+        if (result.launchdPlistPath) console.log(`launchd: ${result.launchdPlistPath}`);
+        printActions(result.actions);
+      }
+      return;
+    }
+    case "daemon-status": {
+      const actions = await daemonStatus({
+        daemon: daemonRuntimeFromOptions(parsed, config),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(actions, null, 2));
+      else printActions(actions);
+      return;
+    }
+    case "daemon-start": {
+      const actions = await startDaemon({
+        daemon: daemonRuntimeFromOptions(parsed, config),
+        launchd: parsed.options.launchd === true,
+        peerListen: stringOption(parsed, "peer-listen"),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(actions, null, 2));
+      else printActions(actions);
+      return;
+    }
+    case "daemon-stop": {
+      const actions = await stopDaemon({
+        daemon: daemonRuntimeFromOptions(parsed, config),
+        launchd: parsed.options.launchd === true,
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(actions, null, 2));
+      else printActions(actions);
+      return;
+    }
+    case "daemon-migrate": {
+      requireDatabaseConfig(config);
+      const projectId = requiredOption(parsed, "project-id");
+      const taskId = requiredOption(parsed, "task-id");
+      const laneId = stringOption(parsed, "lane-id") ?? "main";
+      const daemon = daemonRuntimeFromOptions(parsed, config);
+      const signerState = await loadOrCreateNodeSigner({
+        keyPath: stringOption(parsed, "key-file"),
+        stateDir: daemon.stateDir,
+        nodeId: stringOption(parsed, "node-id"),
+        actorId: stringOption(parsed, "actor-id") ?? "migration-cli",
+      });
+      const provider = new LocalDaemonProvider({
+        socketPath: daemon.socketPath,
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
+      const result = await migratePostgresTaskToProvider({
+        projectId,
+        taskId,
+        laneId,
+        provider,
+        signer: signerState.signer,
+        config,
+      });
+      const output = { ...result, keyPath: signerState.keyPath, keyCreated: signerState.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`task: ${result.taskId}`);
+        console.log(`lane: ${result.laneId}`);
+        console.log(`migrated: ${result.migrated}`);
+        if (result.reason) console.log(`reason: ${result.reason}`);
+        console.log(`journalEntries: ${result.journalEntries}`);
+        console.log(`acceptedBlocks: ${result.acceptedBlocks}`);
+        console.log(`finalTip: ${result.finalTip ?? "<empty>"}`);
+        console.log(`nodeKey: ${signerState.keyPath}${signerState.created ? " (created)" : ""}`);
+      }
+      return;
+    }
     case "doctor": {
       const result = await doctor(config);
       if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
@@ -165,29 +575,84 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       return;
     }
     case "uninstall": {
-      requireDatabaseConfig(config);
-      const actions = await uninstallRuntime(config, { deleteData: Boolean(parsed.options["delete-data"]) });
+      const actions = await uninstallProduct(config, {
+        deleteData: Boolean(parsed.options["delete-data"]),
+        keepIntegrations: Boolean(parsed.options["keep-integrations"]),
+        keepDaemonBinary: Boolean(parsed.options["keep-daemon-binary"]),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+      });
       if (parsed.options.json) console.log(JSON.stringify(actions, null, 2));
       else {
         printActions(actions);
-        if (!parsed.options["delete-data"]) console.log("Data volume was kept. Re-run with --delete-data to remove it.");
+        if (!parsed.options["delete-data"]) console.log("Data was kept. Re-run with --delete-data to remove Docker volume and daemon state.");
       }
       return;
     }
     case "install": {
-      const result = await installAgentContinuity({
-        target: (stringOption(parsed, "target") as InstallTarget | undefined) ?? "all",
+      const target = installTargetOption(parsed);
+      if (target) {
+        const result = await installAgentContinuity({
+          target,
+          home: stringOption(parsed, "home"),
+          dryRun: Boolean(parsed.options["dry-run"]),
+        });
+        if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+        else {
+          console.log(`target: ${result.target}`);
+          for (const path of result.wrote) console.log(`wrote: ${path}`);
+          for (const path of result.removed) console.log(`removed: ${path}`);
+          for (const path of result.skipped) console.log(`skipped: ${path}`);
+          for (const message of result.messages) console.log(message);
+          console.log("Restart OpenCode/Claude for integration changes to load.");
+        }
+        return;
+      }
+      if (parsed.options["dry-run"] === true) {
+        throw new Error("--dry-run is only supported with install --target all|opencode|claude");
+      }
+
+      const result = await installProduct({
         home: stringOption(parsed, "home"),
-        dryRun: Boolean(parsed.options["dry-run"]),
+        runtime: stringOption(parsed, "runtime") as "docker" | undefined,
+        install: parsed.options["no-integrations"] !== true,
+        image: stringOption(parsed, "image"),
+        containerName: stringOption(parsed, "container-name"),
+        volumeName: stringOption(parsed, "volume-name"),
+        host: stringOption(parsed, "host"),
+        port: numberOption(parsed, "port"),
+        database: stringOption(parsed, "database"),
+        user: stringOption(parsed, "user"),
+        password: stringOption(parsed, "password"),
+        queueName: stringOption(parsed, "queue"),
+        checkpointDir: stringOption(parsed, "checkpoint-dir"),
+        daemon: parsed.options["no-daemon"] !== true,
+        daemonLaunchd: parsed.options.launchd === true,
+        daemonPeerListen: stringOption(parsed, "peer-listen"),
+        startDaemon: parsed.options["no-start"] !== true,
+        projectId: stringOption(parsed, "project-id"),
+        taskId: stringOption(parsed, "task-id"),
+        laneId: stringOption(parsed, "lane-id"),
+        actorId: stringOption(parsed, "actor-id"),
+        nodeId: stringOption(parsed, "node-id"),
+        keyFile: stringOption(parsed, "key-file"),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
       });
-      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      const output = { ...result, databaseUrl: maskDatabaseUrl(result.databaseUrl) };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
       else {
-        console.log(`target: ${result.target}`);
-        for (const path of result.wrote) console.log(`wrote: ${path}`);
-        for (const path of result.removed) console.log(`removed: ${path}`);
-        for (const path of result.skipped) console.log(`skipped: ${path}`);
-        for (const message of result.messages) console.log(message);
-        console.log("Restart OpenCode/Claude for integration changes to load.");
+        console.log("install: complete");
+        console.log(`config: ${result.configPath}`);
+        console.log(`database: ${maskDatabaseUrl(result.databaseUrl)}`);
+        printActions(result.actions);
+        console.log("doctor:");
+        printActions(result.doctor.checks);
+        if (result.migration) {
+          console.log(`migration: ${result.migration.migrated ? "migrated" : "skipped"}`);
+          if (result.migration.reason) console.log(`migrationReason: ${result.migration.reason}`);
+          console.log(`migrationBlocks: ${result.migration.acceptedBlocks}`);
+          console.log(`nodeKey: ${result.migration.keyPath}${result.migration.keyCreated ? " (created)" : ""}`);
+        }
+        if (!result.doctor.ok) process.exitCode = 1;
       }
       return;
     }
@@ -234,38 +699,197 @@ function numberOption(parsed: ParsedArgs, name: string): number | undefined {
   return parsedNumber;
 }
 
+function listOption(parsed: ParsedArgs, name: string): string[] {
+  const value = stringOption(parsed, name);
+  if (value === undefined) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+}
+
+function discoveryProviders(parsed: ParsedArgs): OverlayDiscoveryProvider[] {
+  const providers = listOption(parsed, "providers");
+  for (const provider of providers) {
+    if (provider !== "tailscale" && provider !== "zerotier") {
+      throw new Error(`unsupported --providers entry ${provider}; expected tailscale or zerotier`);
+    }
+  }
+  return providers as OverlayDiscoveryProvider[];
+}
+
+function installTargetOption(parsed: ParsedArgs): InstallTarget | undefined {
+  const target = stringOption(parsed, "target");
+  if (target === undefined) return undefined;
+  if (target === "all" || target === "opencode" || target === "claude") return target;
+  throw new Error(`unsupported --target ${target}; expected all, opencode, or claude`);
+}
+
+async function projectIdOption(parsed: ParsedArgs): Promise<string> {
+  return stringOption(parsed, "project-id") ?? inferProjectId();
+}
+
+function daemonRuntimeFromOptions(parsed: ParsedArgs, config: ContinuityConfig): DaemonRuntimeConfig {
+  const base = config.daemon ?? defaultDaemonRuntimeConfig(config.home);
+  return {
+    ...base,
+    binaryPath: stringOption(parsed, "binary") ?? base.binaryPath,
+    stateDir: stringOption(parsed, "state-dir") ?? base.stateDir,
+    socketPath: stringOption(parsed, "socket") ?? base.socketPath,
+    dbPath: stringOption(parsed, "db") ?? base.dbPath,
+    launchdPlistPath: stringOption(parsed, "launchd-plist") ?? base.launchdPlistPath,
+  };
+}
+
+function localDaemonProvider(parsed: ParsedArgs, config: ContinuityConfig): LocalDaemonProvider {
+  const daemon = daemonRuntimeFromOptions(parsed, config);
+  return new LocalDaemonProvider({ socketPath: daemon.socketPath, timeoutMs: numberOption(parsed, "timeout-ms") });
+}
+
+async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, actorId: string): Promise<Awaited<ReturnType<typeof loadOrCreateNodeSigner>>> {
+  const daemon = daemonRuntimeFromOptions(parsed, config);
+  return loadOrCreateNodeSigner({
+    keyPath: stringOption(parsed, "key-file"),
+    stateDir: daemon.stateDir,
+    nodeId: stringOption(parsed, "node-id"),
+    actorId: stringOption(parsed, "actor-id") ?? actorId,
+  });
+}
+
 function requiredOption(parsed: ParsedArgs, name: string): string {
   const value = stringOption(parsed, name);
   if (!value) throw new Error(`missing required option --${name}`);
   return value;
 }
 
+function publishEndpointListOption(parsed: ParsedArgs): string[] {
+  const endpoints = listOption(parsed, "endpoints");
+  const endpoint = stringOption(parsed, "endpoint");
+  if (endpoint) endpoints.unshift(endpoint);
+  if (endpoints.length > 0) return endpoints;
+  const port = numberOption(parsed, "port");
+  if (port !== undefined) return [defaultMdnsEndpoint(port, stringOption(parsed, "host"))];
+  throw new Error("missing required option --endpoint or --port");
+}
+
+function mdnsEndpointOption(parsed: ParsedArgs): string {
+  const endpoint = stringOption(parsed, "endpoint");
+  if (endpoint) return endpoint;
+  const port = numberOption(parsed, "port");
+  if (port === undefined) throw new Error("missing required option --endpoint or --port");
+  return defaultMdnsEndpoint(port, stringOption(parsed, "host"));
+}
+
+function projectListOption(parsed: ParsedArgs): string[] | undefined {
+  const projects = listOption(parsed, "project-ids");
+  const project = stringOption(parsed, "project-id");
+  if (project) projects.unshift(project);
+  return projects.length > 0 ? projects : undefined;
+}
+
+function discoveryFilterOption(parsed: ParsedArgs): DiscoveryFilter {
+  return {
+    projectId: stringOption(parsed, "project-id"),
+    trustedNames: listOption(parsed, "trusted-names"),
+    trustedNodeIds: listOption(parsed, "trusted-node-ids"),
+  };
+}
+
+async function trustDiscoveredPeers(parsed: ParsedArgs, config: ContinuityConfig, peers: DiscoveredOnboardingPeer[]): Promise<Awaited<ReturnType<LocalDaemonProvider["trustPeer"]>>[]> {
+  const provider = localDaemonProvider(parsed, config);
+  return Promise.all(peers.map((peer) => provider.trustPeer(peerTrustInputFromDiscovery(peer))));
+}
+
+function printPeerSyncResult(result: Awaited<ReturnType<LocalDaemonProvider["syncTrustedPeers"]>>): void {
+  console.log(`project: ${result.projectId}`);
+  console.log(`task: ${result.taskId}`);
+  console.log(`lane: ${result.laneId}`);
+  console.log(`trustedPeers: ${result.peers.length}`);
+  console.log(`fetchedBlocks: ${result.fetchedBlocks}`);
+  console.log(`acceptedBlocks: ${result.acceptedBlocks}`);
+  console.log(`insertedBlocks: ${result.insertedBlocks}`);
+  console.log(`rejectedBlocks: ${result.rejectedBlocks}`);
+  console.log(`finalTip: ${result.finalTip ?? "<empty>"}`);
+  for (const peer of result.peers) {
+    const status = peer.error ? `error: ${peer.error}` : `${peer.inserted}/${peer.fetched} inserted`;
+    console.log(`peer: ${peer.endpoint} (${status})`);
+  }
+}
+
+function printOnboardingDiscovery(source: string, peers: DiscoveredOnboardingPeer[], warnings: string[], trustedCount: number): void {
+  if (peers.length === 0) console.log(`${source} peers: none`);
+  for (const peer of peers) {
+    const labels = [peer.name, peer.nodeId, peer.provider, peer.projects?.length ? `projects=${peer.projects.join(",")}` : undefined].filter(Boolean).join(", ");
+    console.log(`${peer.endpoint}${labels ? ` (${labels})` : ""}`);
+  }
+  for (const warning of warnings) console.log(`warning: ${warning}`);
+  if (trustedCount > 0) console.log(`trusted: ${trustedCount}`);
+}
+
 function printHelp(): void {
   console.log(`continuity <command>
 
 Commands:
-  setup       Set up local Postgres, Absurd, continuity schema, and integrations
+  install     Install local runtime, integrations, daemon, and optional task migration
+  uninstall   Remove local install artifacts; keeps data unless --delete-data
+  setup       Low-level local Postgres, Absurd, schema, integrations, and daemon setup
   checkpoint  Append a journal entry and rewrite canon through Absurd
   doctor      Verify CLI, runtime, database schemas, queue, and integrations
+  dashboard   Render a tmux-friendly continuityd lane dashboard
+  daemon-install Build/install the local continuityd daemon binary
+  daemon-start Start continuityd from configured or default daemon paths
+  daemon-stop Stop continuityd from configured or default daemon paths
+  daemon-status Check local continuityd health
+  daemon-migrate Migrate PostgreSQL continuity state into continuityd blocks
+  peer-add   Trust a daemon peer endpoint for sync
+  peer-list  List trusted daemon peer endpoints
+  peer-remove Remove a trusted daemon peer endpoint
+  peer-sync  Sync a task/lane from trusted daemon peers
+  peer-invite-create Create a signed peer invite URL
+  peer-invite-accept Trust a signed peer invite URL
+  presence-publish Publish signed presence to a rendezvous directory
+  presence-discover Discover signed peers from a rendezvous directory
+  mdns-advertise Advertise signed peer presence with local DNS-SD
+  mdns-discover Discover signed peer presence with local DNS-SD
+  peer-discover Optional provider discovery for Tailscale/ZeroTier peers
   start       Start the configured local runtime
   stop        Stop the configured local runtime
   backup      Dump the configured local Postgres database
-  uninstall   Remove runtime container/config; keeps data unless --delete-data
   import      Import existing markdown projection into PostgreSQL through Absurd
-  install     Install OpenCode and/or Claude integrations
+  install --target all|opencode|claude
+              Install only agent integrations
   reconcile   Rewrite canon from --canon-file through Absurd
   resume      Print the canon for a task from PostgreSQL
   status      Show database-backed continuity state
 
 Examples:
-  continuity setup --local
+  continuity install
+  continuity install --project-id PROJECT --task-id TASK --lane-id main
+  continuity install --target all
+  continuity uninstall
+  continuity uninstall --delete-data
+  continuity setup --local --daemon
   continuity doctor
   continuity checkpoint --task-id TASK --status completed --progress "Done" --next "Ship"
-  continuity install --target all
+  continuity checkpoint --daemon --task-id TASK --status completed --progress "Done" --next "Ship"
   continuity import --task-id TASK --journal-file ~/.config/opencode/checkpoints/TASK.md --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity reconcile --task-id TASK --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity resume --task-id TASK
-  continuity status --json`);
+  continuity resume --daemon --task-id TASK
+  continuity resume --daemon --sync --task-id TASK
+  continuity status --json
+  continuity dashboard --project-id PROJECT --task-id TASK --lane-id main
+  continuity peer-invite-create --endpoint tcp://10.44.110.222:9987
+  continuity peer-invite-accept --invite 'continuity://peer?...'
+  continuity presence-publish --rendezvous /shared/continuity --port 9987 --project-id PROJECT
+  continuity presence-discover --rendezvous /shared/continuity --trusted-node-ids NODE --add
+  continuity mdns-advertise --port 9987
+  continuity mdns-discover --trusted-names macbook --add
+  continuity peer-add --endpoint tcp://100.64.0.2:9987 --name workstation
+  continuity peer-sync --project-id PROJECT --task-id TASK
+  continuity daemon-install --dry-run --launchd
+  continuity daemon-start
+  continuity daemon-migrate --project-id PROJECT --task-id TASK`);
 }
 
 function commandConfig(parsed: ParsedArgs): ContinuityConfig {

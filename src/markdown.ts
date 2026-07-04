@@ -24,14 +24,21 @@ export function renderJournal(entries: JournalEntry[]): string {
 }
 
 export function renderDefaultCanon(input: CheckpointInput): string {
+  const daemonSource = input.source?.startsWith("daemon");
+  const sourceLine = daemonSource
+    ? `- Daemon continuity via \`continuity resume --daemon --task-id ${input.taskId}\`.`
+    : `- PostgreSQL continuity tables via \`continuity resume --task-id ${input.taskId}\`.`;
+  const staleFix = daemonSource
+    ? `Run \`continuity checkpoint --daemon --task-id ${input.taskId}\` with reconciled canon before acting.`
+    : `Run \`continuity reconcile --task-id ${input.taskId}\` before acting.`;
   return `# Canon: ${input.taskId}
 
 last-reconciled: ${input.timestamp}
 <!-- STALENESS GUARD: if last-reconciled != the journal's newest entry timestamp,
-     this canon is STALE. Run \`continuity reconcile --task-id ${input.taskId}\` before acting. -->
+     this canon is STALE. ${staleFix} -->
 
 ## SOURCE-OF-TRUTH
-- PostgreSQL continuity tables via \`continuity resume --task-id ${input.taskId}\`.
+${sourceLine}
 
 ## CURRENT-TRUTH / INVARIANTS
 - ${input.progress}

@@ -1,0 +1,684 @@
+package continuityd
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+type SQLiteStore struct {
+	db *sql.DB
+}
+
+func OpenSQLiteStore(ctx context.Context, path string) (*SQLiteStore, error) {
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite store: %w", err)
+	}
+	store := &SQLiteStore{db: db}
+	if err := store.configure(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if err := store.Migrate(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *SQLiteStore) Close() error {
+	return s.db.Close()
+}
+
+func (s *SQLiteStore) configure(ctx context.Context) error {
+	for _, statement := range []string{
+		`PRAGMA foreign_keys = ON`,
+		`PRAGMA busy_timeout = 5000`,
+		`PRAGMA journal_mode = WAL`,
+	} {
+		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("configure sqlite store: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) Migrate(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `
+      CREATE TABLE IF NOT EXISTS store_meta (
+        key text PRIMARY KEY,
+        value text NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS task_blocks (
+        sequence integer PRIMARY KEY AUTOINCREMENT,
+        block_id text NOT NULL UNIQUE,
+        version integer NOT NULL,
+        project_id text NOT NULL,
+        task_id text NOT NULL,
+        lane_id text NOT NULL,
+        kind text NOT NULL,
+        parent_tips_json text NOT NULL,
+        node_id text NOT NULL,
+        actor_id text NOT NULL,
+        lease_epoch integer NOT NULL,
+        created_at text NOT NULL,
+        payload_hash text NOT NULL,
+        payload_json text NOT NULL,
+        signature_json text NOT NULL,
+        block_json text NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS task_blocks_lane_sequence_idx
+        ON task_blocks(project_id, task_id, lane_id, sequence);
+
+      CREATE INDEX IF NOT EXISTS task_blocks_lane_tip_idx
+        ON task_blocks(project_id, task_id, lane_id, block_id);
+
+	      CREATE TABLE IF NOT EXISTS lane_projections (
+	        project_id text NOT NULL,
+	        task_id text NOT NULL,
+        lane_id text NOT NULL,
+        tip text,
+        lease_epoch integer NOT NULL,
+        owner_node_id text,
+        owner_actor_id text,
+        owner_lease_epoch integer,
+        owner_lease_until text,
+        canon_markdown text,
+        inventory_markdown text,
+        checkpoint_json text,
+        updated_at text,
+	        PRIMARY KEY (project_id, task_id, lane_id)
+	      );
+
+	      CREATE TABLE IF NOT EXISTS trusted_peers (
+	        endpoint text PRIMARY KEY,
+	        node_id text,
+	        name text,
+	        public_key text,
+	        provider text,
+	        enabled integer NOT NULL DEFAULT 1,
+	        created_at text NOT NULL,
+	        updated_at text NOT NULL,
+	        last_seen_at text
+	      );
+
+	      CREATE INDEX IF NOT EXISTS trusted_peers_enabled_idx
+	        ON trusted_peers(enabled, endpoint);
+
+	      INSERT INTO store_meta(key, value)
+	      VALUES ('schema_version', '1')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    `)
+	if err != nil {
+		return fmt.Errorf("migrate sqlite store: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpsertTrustedPeer(ctx context.Context, peer TrustedPeer, now string) (TrustedPeer, error) {
+	if peer.Endpoint == "" {
+		return TrustedPeer{}, fmt.Errorf("trusted peer endpoint is required")
+	}
+	timestamp := timestampOrNow(now)
+	_, err := s.db.ExecContext(ctx, `
+      INSERT INTO trusted_peers (
+        endpoint, node_id, name, public_key, provider, enabled,
+        created_at, updated_at, last_seen_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(endpoint) DO UPDATE SET
+        node_id = excluded.node_id,
+        name = excluded.name,
+        public_key = excluded.public_key,
+        provider = excluded.provider,
+        enabled = excluded.enabled,
+        updated_at = excluded.updated_at`,
+		peer.Endpoint,
+		nullIfEmpty(peer.NodeID),
+		nullIfEmpty(peer.Name),
+		nullIfEmpty(peer.PublicKey),
+		nullIfEmpty(peer.Provider),
+		boolInt(peer.Enabled),
+		timestamp,
+		timestamp,
+		nullIfEmpty(peer.LastSeenAt),
+	)
+	if err != nil {
+		return TrustedPeer{}, fmt.Errorf("upsert trusted peer %s: %w", peer.Endpoint, err)
+	}
+	saved, found, err := s.TrustedPeer(ctx, peer.Endpoint)
+	if err != nil {
+		return TrustedPeer{}, err
+	}
+	if !found {
+		return TrustedPeer{}, fmt.Errorf("trusted peer %s was not saved", peer.Endpoint)
+	}
+	return saved, nil
+}
+
+func (s *SQLiteStore) TrustedPeer(ctx context.Context, endpoint string) (TrustedPeer, bool, error) {
+	var row trustedPeerRow
+	err := s.db.QueryRowContext(ctx, `
+      SELECT endpoint, node_id, name, public_key, provider, enabled,
+             created_at, updated_at, last_seen_at
+      FROM trusted_peers
+      WHERE endpoint = ?`, endpoint).Scan(
+		&row.Endpoint,
+		&row.NodeID,
+		&row.Name,
+		&row.PublicKey,
+		&row.Provider,
+		&row.Enabled,
+		&row.CreatedAt,
+		&row.UpdatedAt,
+		&row.LastSeenAt,
+	)
+	if err == sql.ErrNoRows {
+		return TrustedPeer{}, false, nil
+	}
+	if err != nil {
+		return TrustedPeer{}, false, fmt.Errorf("load trusted peer %s: %w", endpoint, err)
+	}
+	return row.toPeer(), true, nil
+}
+
+func (s *SQLiteStore) TrustedPeers(ctx context.Context, enabledOnly bool) ([]TrustedPeer, error) {
+	query := `
+      SELECT endpoint, node_id, name, public_key, provider, enabled,
+             created_at, updated_at, last_seen_at
+      FROM trusted_peers`
+	if enabledOnly {
+		query += ` WHERE enabled = 1`
+	}
+	query += ` ORDER BY endpoint ASC`
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query trusted peers: %w", err)
+	}
+	defer rows.Close()
+
+	peers := make([]TrustedPeer, 0)
+	for rows.Next() {
+		var row trustedPeerRow
+		if err := rows.Scan(
+			&row.Endpoint,
+			&row.NodeID,
+			&row.Name,
+			&row.PublicKey,
+			&row.Provider,
+			&row.Enabled,
+			&row.CreatedAt,
+			&row.UpdatedAt,
+			&row.LastSeenAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan trusted peer: %w", err)
+		}
+		peers = append(peers, row.toPeer())
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trusted peers: %w", err)
+	}
+	return peers, nil
+}
+
+func (s *SQLiteStore) RemoveTrustedPeer(ctx context.Context, endpoint string) (bool, error) {
+	if endpoint == "" {
+		return false, fmt.Errorf("trusted peer endpoint is required")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM trusted_peers WHERE endpoint = ?`, endpoint)
+	if err != nil {
+		return false, fmt.Errorf("remove trusted peer %s: %w", endpoint, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read trusted peer remove result: %w", err)
+	}
+	return affected > 0, nil
+}
+
+func (s *SQLiteStore) TouchTrustedPeer(ctx context.Context, endpoint string, now string) error {
+	if endpoint == "" {
+		return nil
+	}
+	timestamp := timestampOrNow(now)
+	_, err := s.db.ExecContext(ctx, `
+      UPDATE trusted_peers
+      SET last_seen_at = ?, updated_at = ?
+      WHERE endpoint = ?`, timestamp, timestamp, endpoint)
+	if err != nil {
+		return fmt.Errorf("touch trusted peer %s: %w", endpoint, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) HasBlock(ctx context.Context, blockID string) (bool, error) {
+	return hasBlock(ctx, s.db, blockID)
+}
+
+func (s *SQLiteStore) LaneProjection(ctx context.Context, ref LaneRef) (LaneProjection, bool, error) {
+	return laneProjection(ctx, s.db, ref)
+}
+
+func (s *SQLiteStore) Blocks(ctx context.Context, ref LaneRef) ([]TaskBlock, error) {
+	rows, err := s.db.QueryContext(ctx, `
+      SELECT block_json
+      FROM task_blocks
+      WHERE project_id = ? AND task_id = ? AND lane_id = ?
+      ORDER BY sequence ASC`, ref.ProjectID, ref.TaskID, ref.LaneID)
+	if err != nil {
+		return nil, fmt.Errorf("query lane blocks: %w", err)
+	}
+	defer rows.Close()
+
+	blocks := make([]TaskBlock, 0)
+	for rows.Next() {
+		var blockJSON string
+		if err := rows.Scan(&blockJSON); err != nil {
+			return nil, fmt.Errorf("scan lane block: %w", err)
+		}
+		block, err := decodeBlock(blockJSON)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate lane blocks: %w", err)
+	}
+	return blocks, nil
+}
+
+func (s *SQLiteStore) AppendBlock(ctx context.Context, block TaskBlock, now string) (AppendBlockResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AppendBlockResult{}, fmt.Errorf("begin append block: %w", err)
+	}
+	defer tx.Rollback()
+
+	exists, err := hasBlock(ctx, tx, block.BlockID)
+	if err != nil {
+		return AppendBlockResult{}, err
+	}
+	if exists {
+		lane, found, err := laneProjection(ctx, tx, block.LaneRef())
+		if err != nil {
+			return AppendBlockResult{}, err
+		}
+		if !found {
+			lane = EmptyLaneProjection(block.LaneRef())
+		}
+		return AppendBlockResult{Accepted: true, Inserted: false, Action: ActionContinue, Lane: lane, Block: &block}, nil
+	}
+
+	current, found, err := laneProjection(ctx, tx, block.LaneRef())
+	if err != nil {
+		return AppendBlockResult{}, err
+	}
+	var currentPtr *LaneProjection
+	if found {
+		currentPtr = &current
+	}
+	validation := ValidateBlockTransition(block, TransitionContext{
+		Current: currentPtr,
+		HasBlock: func(blockID string) bool {
+			ok, err := hasBlock(ctx, tx, blockID)
+			return err == nil && ok
+		},
+		Now: now,
+	})
+	if !validation.OK {
+		lane := EmptyLaneProjection(block.LaneRef())
+		if found {
+			lane = current
+		}
+		return AppendBlockResult{
+			Accepted:  false,
+			Inserted:  false,
+			Action:    validation.Action,
+			Lane:      lane,
+			Rejection: validation.Rejection,
+		}, nil
+	}
+
+	lane := ApplyBlockToProjection(currentPtr, block)
+	if err := insertBlock(ctx, tx, block); err != nil {
+		return AppendBlockResult{}, err
+	}
+	if err := upsertProjection(ctx, tx, lane); err != nil {
+		return AppendBlockResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AppendBlockResult{}, fmt.Errorf("commit append block: %w", err)
+	}
+	return AppendBlockResult{Accepted: true, Inserted: true, Action: ActionContinue, Lane: lane, Block: &block}, nil
+}
+
+func (s *SQLiteStore) RebuildProjections(ctx context.Context) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin projection rebuild: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM lane_projections`); err != nil {
+		return 0, fmt.Errorf("clear projections: %w", err)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT sequence, block_json FROM task_blocks ORDER BY sequence ASC`)
+	if err != nil {
+		return 0, fmt.Errorf("query blocks for projection rebuild: %w", err)
+	}
+	defer rows.Close()
+
+	projections := map[string]LaneProjection{}
+	seen := map[string]bool{}
+	count := 0
+	for rows.Next() {
+		var sequence int64
+		var blockJSON string
+		if err := rows.Scan(&sequence, &blockJSON); err != nil {
+			return 0, fmt.Errorf("scan block for projection rebuild: %w", err)
+		}
+		block, err := decodeBlock(blockJSON)
+		if err != nil {
+			return 0, err
+		}
+		key := laneKey(block.LaneRef())
+		current, ok := projections[key]
+		var currentPtr *LaneProjection
+		if ok {
+			currentPtr = &current
+		}
+		validation := ValidateBlockTransition(block, TransitionContext{
+			Current: currentPtr,
+			HasBlock: func(blockID string) bool {
+				return seen[blockID]
+			},
+		})
+		if !validation.OK {
+			return 0, fmt.Errorf("cannot replay block %s at sequence %d: %s: %s", block.BlockID, sequence, validation.Rejection.Code, validation.Rejection.Message)
+		}
+		lane := ApplyBlockToProjection(currentPtr, block)
+		if err := upsertProjection(ctx, tx, lane); err != nil {
+			return 0, err
+		}
+		projections[key] = lane
+		seen[block.BlockID] = true
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate blocks for projection rebuild: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit projection rebuild: %w", err)
+	}
+	return count, nil
+}
+
+type queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func hasBlock(ctx context.Context, db queryer, blockID string) (bool, error) {
+	var found int
+	err := db.QueryRowContext(ctx, `SELECT 1 FROM task_blocks WHERE block_id = ?`, blockID).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lookup block %s: %w", blockID, err)
+	}
+	return true, nil
+}
+
+func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjection, bool, error) {
+	var row projectionRow
+	err := db.QueryRowContext(ctx, `
+      SELECT project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
+             owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
+             inventory_markdown, checkpoint_json, updated_at
+      FROM lane_projections
+      WHERE project_id = ? AND task_id = ? AND lane_id = ?`, ref.ProjectID, ref.TaskID, ref.LaneID).Scan(
+		&row.ProjectID,
+		&row.TaskID,
+		&row.LaneID,
+		&row.Tip,
+		&row.LeaseEpoch,
+		&row.OwnerNodeID,
+		&row.OwnerActorID,
+		&row.OwnerLeaseEpoch,
+		&row.OwnerLeaseUntil,
+		&row.CanonMarkdown,
+		&row.InventoryMarkdown,
+		&row.CheckpointJSON,
+		&row.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return LaneProjection{}, false, nil
+	}
+	if err != nil {
+		return LaneProjection{}, false, fmt.Errorf("load lane projection: %w", err)
+	}
+	return row.toProjection(), true, nil
+}
+
+func insertBlock(ctx context.Context, db execer, block TaskBlock) error {
+	parentTipsJSON, err := json.Marshal(block.ParentTips)
+	if err != nil {
+		return err
+	}
+	payloadJSON, err := json.Marshal(block.Payload)
+	if err != nil {
+		return err
+	}
+	signatureJSON, err := json.Marshal(block.Signature)
+	if err != nil {
+		return err
+	}
+	blockJSON, err := json.Marshal(block)
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `
+      INSERT INTO task_blocks (
+        block_id, version, project_id, task_id, lane_id, kind, parent_tips_json,
+        node_id, actor_id, lease_epoch, created_at, payload_hash, payload_json,
+        signature_json, block_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		block.BlockID,
+		block.Version,
+		block.ProjectID,
+		block.TaskID,
+		block.LaneID,
+		block.Kind,
+		string(parentTipsJSON),
+		block.NodeID,
+		block.ActorID,
+		block.LeaseEpoch,
+		block.CreatedAt,
+		block.PayloadHash,
+		string(payloadJSON),
+		string(signatureJSON),
+		string(blockJSON),
+	)
+	if err != nil {
+		return fmt.Errorf("insert block %s: %w", block.BlockID, err)
+	}
+	return nil
+}
+
+func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error {
+	var checkpointJSON any
+	if lane.Checkpoint != nil {
+		bytes, err := json.Marshal(lane.Checkpoint)
+		if err != nil {
+			return err
+		}
+		checkpointJSON = string(bytes)
+	}
+	var ownerNodeID, ownerActorID, ownerLeaseUntil any
+	var ownerLeaseEpoch any
+	if lane.Owner != nil {
+		ownerNodeID = lane.Owner.NodeID
+		ownerActorID = lane.Owner.ActorID
+		ownerLeaseEpoch = lane.Owner.LeaseEpoch
+		if lane.Owner.LeaseUntil != "" {
+			ownerLeaseUntil = lane.Owner.LeaseUntil
+		}
+	}
+	_, err := db.ExecContext(ctx, `
+      INSERT INTO lane_projections (
+        project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
+        owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
+        inventory_markdown, checkpoint_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(project_id, task_id, lane_id) DO UPDATE SET
+        tip = excluded.tip,
+        lease_epoch = excluded.lease_epoch,
+        owner_node_id = excluded.owner_node_id,
+        owner_actor_id = excluded.owner_actor_id,
+        owner_lease_epoch = excluded.owner_lease_epoch,
+        owner_lease_until = excluded.owner_lease_until,
+        canon_markdown = excluded.canon_markdown,
+        inventory_markdown = excluded.inventory_markdown,
+        checkpoint_json = excluded.checkpoint_json,
+        updated_at = excluded.updated_at`,
+		lane.ProjectID,
+		lane.TaskID,
+		lane.LaneID,
+		nullIfEmpty(lane.Tip),
+		lane.LeaseEpoch,
+		ownerNodeID,
+		ownerActorID,
+		ownerLeaseEpoch,
+		ownerLeaseUntil,
+		nullIfEmpty(lane.CanonMarkdown),
+		nullIfEmpty(lane.InventoryMarkdown),
+		checkpointJSON,
+		nullIfEmpty(lane.UpdatedAt),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert lane projection: %w", err)
+	}
+	return nil
+}
+
+func decodeBlock(blockJSON string) (TaskBlock, error) {
+	var block TaskBlock
+	if err := json.Unmarshal([]byte(blockJSON), &block); err != nil {
+		return TaskBlock{}, fmt.Errorf("decode stored block: %w", err)
+	}
+	return block, nil
+}
+
+func laneKey(ref LaneRef) string {
+	return ref.ProjectID + "\x00" + ref.TaskID + "\x00" + ref.LaneID
+}
+
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func timestampOrNow(value string) string {
+	if value != "" {
+		return value
+	}
+	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+type projectionRow struct {
+	ProjectID         string
+	TaskID            string
+	LaneID            string
+	Tip               sql.NullString
+	LeaseEpoch        int64
+	OwnerNodeID       sql.NullString
+	OwnerActorID      sql.NullString
+	OwnerLeaseEpoch   sql.NullInt64
+	OwnerLeaseUntil   sql.NullString
+	CanonMarkdown     sql.NullString
+	InventoryMarkdown sql.NullString
+	CheckpointJSON    sql.NullString
+	UpdatedAt         sql.NullString
+}
+
+func (r projectionRow) toProjection() LaneProjection {
+	lane := LaneProjection{
+		ProjectID:         r.ProjectID,
+		TaskID:            r.TaskID,
+		LaneID:            r.LaneID,
+		Tip:               nullStringValue(r.Tip),
+		LeaseEpoch:        r.LeaseEpoch,
+		CanonMarkdown:     nullStringValue(r.CanonMarkdown),
+		InventoryMarkdown: nullStringValue(r.InventoryMarkdown),
+		UpdatedAt:         nullStringValue(r.UpdatedAt),
+	}
+	if r.OwnerNodeID.Valid && r.OwnerActorID.Valid && r.OwnerLeaseEpoch.Valid {
+		lane.Owner = &LaneOwner{
+			NodeID:     r.OwnerNodeID.String,
+			ActorID:    r.OwnerActorID.String,
+			LeaseEpoch: r.OwnerLeaseEpoch.Int64,
+			LeaseUntil: nullStringValue(r.OwnerLeaseUntil),
+		}
+	}
+	if r.CheckpointJSON.Valid {
+		var checkpoint CheckpointProjection
+		if err := json.Unmarshal([]byte(r.CheckpointJSON.String), &checkpoint); err == nil {
+			lane.Checkpoint = &checkpoint
+		}
+	}
+	return lane
+}
+
+func nullStringValue(value sql.NullString) string {
+	if !value.Valid {
+		return ""
+	}
+	return value.String
+}
+
+type trustedPeerRow struct {
+	Endpoint   string
+	NodeID     sql.NullString
+	Name       sql.NullString
+	PublicKey  sql.NullString
+	Provider   sql.NullString
+	Enabled    int
+	CreatedAt  string
+	UpdatedAt  string
+	LastSeenAt sql.NullString
+}
+
+func (r trustedPeerRow) toPeer() TrustedPeer {
+	return TrustedPeer{
+		Endpoint:   r.Endpoint,
+		NodeID:     nullStringValue(r.NodeID),
+		Name:       nullStringValue(r.Name),
+		PublicKey:  nullStringValue(r.PublicKey),
+		Provider:   nullStringValue(r.Provider),
+		Enabled:    r.Enabled != 0,
+		CreatedAt:  r.CreatedAt,
+		UpdatedAt:  r.UpdatedAt,
+		LastSeenAt: nullStringValue(r.LastSeenAt),
+	}
+}

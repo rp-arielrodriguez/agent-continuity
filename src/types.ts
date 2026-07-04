@@ -9,6 +9,7 @@ export interface ContinuityConfig {
   configPath?: string;
   databaseConfigured?: boolean;
   runtime?: RuntimeConfig;
+  daemon?: DaemonRuntimeConfig;
 }
 
 export interface StoredConfig {
@@ -18,6 +19,7 @@ export interface StoredConfig {
   checkpointDir: string;
   workerTimeoutSeconds?: number;
   runtime?: RuntimeConfig;
+  daemon?: DaemonRuntimeConfig;
 }
 
 export type RuntimeConfig = DockerRuntimeConfig;
@@ -32,6 +34,16 @@ export interface DockerRuntimeConfig {
   database: string;
   user: string;
   password: string;
+}
+
+export interface DaemonRuntimeConfig {
+  kind: "daemon";
+  binaryPath: string;
+  stateDir: string;
+  socketPath: string;
+  dbPath: string;
+  launchdPlistPath?: string;
+  launchdLabel?: string;
 }
 
 export interface CheckpointInput {
