@@ -468,21 +468,35 @@ async function runDnsSd(args: string[], timeoutMs: number): Promise<{ stdout: st
 function waitForMdnsAdvertiser(child: ChildProcess, durationMs: number | undefined): Promise<void> {
   return new Promise((resolve, reject) => {
     let stderr = "";
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
     child.stderr?.setEncoding("utf8");
     child.stderr?.on("data", (chunk) => {
       stderr += chunk;
     });
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
-      if (code === 0 || signal === "SIGTERM") resolve();
-      else reject(new Error(`dns-sd advertiser exited with ${signal ?? code}: ${stderr.trim()}`));
-    });
+    const cleanup = (): void => {
+      if (timer) clearTimeout(timer);
+      process.off("SIGINT", stop);
+      process.off("SIGTERM", stop);
+    };
+    const finish = (result: "resolve" | "reject", error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (result === "resolve") resolve();
+      else reject(error);
+    };
     const stop = (): void => {
       child.kill("SIGTERM");
     };
+    child.once("error", (error) => finish("reject", error));
+    child.once("exit", (code, signal) => {
+      if (code === 0 || signal === "SIGTERM") finish("resolve");
+      else finish("reject", new Error(`dns-sd advertiser exited with ${signal ?? code}: ${stderr.trim()}`));
+    });
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
-    if (durationMs !== undefined) setTimeout(stop, durationMs);
+    if (durationMs !== undefined) timer = setTimeout(stop, durationMs);
     if (durationMs === undefined) {
       console.log(`mDNS advertising ${MDNS_SERVICE} as ${child.spawnargs.slice(2, 6).join(" ")}`);
     }
