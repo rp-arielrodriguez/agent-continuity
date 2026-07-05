@@ -215,6 +215,9 @@ continuity presence-discover \
 
 # Local network discovery when DNS-SD is available.
 continuity mdns-advertise --port 9987 --name ariel-main
+continuity mdns-advertise --port 9987 --name ariel-main --background
+continuity mdns-advertise-status
+continuity mdns-advertise-stop
 continuity mdns-discover --trusted-names ariel-main --add
 ```
 

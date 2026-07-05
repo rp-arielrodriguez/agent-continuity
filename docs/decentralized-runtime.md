@@ -944,10 +944,14 @@ Phase 15: provider-agnostic signed peer onboarding done
   presence files, mDNS/DNS-SD TXT presence, signature validation, explicit trust
   filters for bulk add, and trust-input mapping into the daemon address book.
   src/cli.ts exposes continuity peer-invite-create, peer-invite-accept,
-  presence-publish, presence-discover, mdns-advertise, and mdns-discover.
+  presence-publish, presence-discover, mdns-advertise, mdns-advertise-status,
+  mdns-advertise-stop, and mdns-discover.
   presence-publish and mdns-advertise support --port so a node can bind the
   peer listener to :9987 and publish tcp://<hostname>.local:9987 without a
   fixed overlay IP.
+  mdns-advertise --background writes a daemon-state PID file and can be managed
+  with status/stop commands, avoiding foreground test sessions for long-running
+  local discovery.
   src/sdk.ts exports the onboarding API for agent integrations.
   Provider-specific peer-discover remains available as optional
   Tailscale/ZeroTier convenience, but it is no longer the product's core peer

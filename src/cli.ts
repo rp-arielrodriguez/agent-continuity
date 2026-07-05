@@ -21,7 +21,10 @@ import {
   peerTrustInputFromDiscovery,
   peerTrustInputFromInvite,
   publishRendezvousPresence,
+  readMdnsAdvertiserStatus,
   requireTrustedFilterForAdd,
+  startMdnsAdvertiser,
+  stopMdnsAdvertiser,
   type DiscoveryFilter,
   type DiscoveredOnboardingPeer,
 } from "./peer-onboarding.js";
@@ -389,11 +392,45 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         },
         signer.signer,
       );
+      const durationMs = numberOption(parsed, "duration-ms");
+      if (parsed.options.background === true) {
+        if (durationMs !== undefined) throw new Error("--background cannot be combined with --duration-ms; stop it with mdns-advertise-stop");
+        const state = await startMdnsAdvertiser({
+          presence,
+          stateDir: daemonRuntimeFromOptions(parsed, config).stateDir,
+          now: stringOption(parsed, "now"),
+        });
+        if (parsed.options.json) console.log(JSON.stringify({ state, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+        else {
+          console.log("mDNS advertiser: started");
+          console.log(`pid: ${state.pid}`);
+          console.log(`name: ${state.name}`);
+          console.log(`endpoint: ${state.endpoint}`);
+          console.log(`state: ${state.stateFile}`);
+        }
+        return;
+      }
       if (parsed.options.json) {
         console.log(JSON.stringify({ presence, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
         return;
       }
-      await advertiseMdnsPresence({ presence, durationMs: numberOption(parsed, "duration-ms") });
+      await advertiseMdnsPresence({ presence, durationMs });
+      return;
+    }
+    case "mdns-advertise-status": {
+      const status = await readMdnsAdvertiserStatus({ stateDir: daemonRuntimeFromOptions(parsed, config).stateDir });
+      if (parsed.options.json) console.log(JSON.stringify(status, null, 2));
+      else printMdnsAdvertiserStatus(status);
+      return;
+    }
+    case "mdns-advertise-stop": {
+      const result = await stopMdnsAdvertiser({ stateDir: daemonRuntimeFromOptions(parsed, config).stateDir });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`mDNS advertiser: ${result.stopped ? "stopped" : "not running"}`);
+        if (result.pid) console.log(`pid: ${result.pid}`);
+        if (result.reason) console.log(`reason: ${result.reason}`);
+      }
       return;
     }
     case "mdns-discover": {
@@ -826,6 +863,17 @@ function printOnboardingDiscovery(source: string, peers: DiscoveredOnboardingPee
   if (trustedCount > 0) console.log(`trusted: ${trustedCount}`);
 }
 
+function printMdnsAdvertiserStatus(status: Awaited<ReturnType<typeof readMdnsAdvertiserStatus>>): void {
+  console.log(`mDNS advertiser: ${status.running ? "running" : "stopped"}`);
+  console.log(`state: ${status.stateFile}`);
+  if (status.state) {
+    console.log(`pid: ${status.state.pid}`);
+    console.log(`name: ${status.state.name}`);
+    console.log(`endpoint: ${status.state.endpoint}`);
+  }
+  if (status.reason) console.log(`reason: ${status.reason}`);
+}
+
 function printHelp(): void {
   console.log(`continuity <command>
 
@@ -850,6 +898,8 @@ Commands:
   presence-publish Publish signed presence to a rendezvous directory
   presence-discover Discover signed peers from a rendezvous directory
   mdns-advertise Advertise signed peer presence with local DNS-SD
+  mdns-advertise-status Show background mDNS advertiser status
+  mdns-advertise-stop Stop background mDNS advertiser
   mdns-discover Discover signed peer presence with local DNS-SD
   peer-discover Optional provider discovery for Tailscale/ZeroTier peers
   start       Start the configured local runtime
@@ -884,6 +934,9 @@ Examples:
   continuity presence-publish --rendezvous /shared/continuity --port 9987 --project-id PROJECT
   continuity presence-discover --rendezvous /shared/continuity --trusted-node-ids NODE --add
   continuity mdns-advertise --port 9987
+  continuity mdns-advertise --port 9987 --background
+  continuity mdns-advertise-status
+  continuity mdns-advertise-stop
   continuity mdns-discover --trusted-names macbook --add
   continuity peer-add --endpoint tcp://100.64.0.2:9987 --name workstation
   continuity peer-sync --project-id PROJECT --task-id TASK

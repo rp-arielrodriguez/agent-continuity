@@ -1,6 +1,6 @@
 import { execFile as execFileCallback, spawn, type ChildProcess } from "node:child_process";
 import { createPublicKey, randomUUID, verify as verifySignature } from "node:crypto";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ const PRESENCE_KIND = "agent-continuity.peer-presence";
 const INVITE_URL_HOST = "peer";
 const RENDEZVOUS_FILE_SUFFIX = ".presence.json";
 const MDNS_SERVICE = "_continuity._tcp";
+const MDNS_ADVERTISER_STATE_FILE = "mdns-advertise.json";
 
 export interface PeerEndpoint {
   endpoint: string;
@@ -73,6 +74,32 @@ export interface DiscoveryFilter {
 export interface DiscoveryResult {
   peers: DiscoveredOnboardingPeer[];
   warnings: string[];
+}
+
+export interface MdnsAdvertiserState {
+  version: 1;
+  pid: number;
+  name: string;
+  nodeId: string;
+  endpoint: string;
+  provider?: string;
+  projects?: string[];
+  startedAt: string;
+  stateFile: string;
+}
+
+export interface MdnsAdvertiserStatus {
+  stateFile: string;
+  running: boolean;
+  state?: MdnsAdvertiserState;
+  reason?: string;
+}
+
+export interface MdnsAdvertiserStopResult {
+  stateFile: string;
+  stopped: boolean;
+  pid?: number;
+  reason?: string;
 }
 
 export async function createPeerInvite(
@@ -253,12 +280,89 @@ export function presenceFromMdnsTxt(values: string[]): PeerPresence {
 }
 
 export async function advertiseMdnsPresence(input: { presence: PeerPresence; durationMs?: number }): Promise<void> {
-  const endpoint = parseTcpEndpoint(input.presence.endpoints[0].endpoint);
-  const txt = mdnsTxtForPresence(input.presence);
-  const child = spawn("dns-sd", ["-R", input.presence.name ?? input.presence.nodeId, MDNS_SERVICE, "local", String(endpoint.port), ...txt], {
+  const child = spawn("dns-sd", mdnsAdvertiseArgs(input.presence), {
     stdio: ["ignore", "pipe", "pipe"],
   });
   await waitForMdnsAdvertiser(child, input.durationMs);
+}
+
+export async function startMdnsAdvertiser(input: { presence: PeerPresence; stateDir: string; now?: string }): Promise<MdnsAdvertiserState> {
+  validatePeerPresence(input.presence);
+  const stateFile = mdnsAdvertiserStatePath(input.stateDir);
+  const existing = await readMdnsAdvertiserStatus({ stateDir: input.stateDir });
+  if (existing.running && existing.state) {
+    throw new Error(`mDNS advertiser is already running with pid ${existing.state.pid}; stop it first`);
+  }
+  await mkdir(path.dirname(stateFile), { recursive: true });
+  const child = spawn("dns-sd", mdnsAdvertiseArgs(input.presence), {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+
+  const endpoint = input.presence.endpoints[0];
+  const state: MdnsAdvertiserState = {
+    version: 1,
+    pid: child.pid ?? 0,
+    name: input.presence.name ?? input.presence.nodeId,
+    nodeId: input.presence.nodeId,
+    endpoint: endpoint.endpoint,
+    provider: endpoint.provider,
+    projects: input.presence.projects,
+    startedAt: input.now ?? new Date().toISOString(),
+    stateFile,
+  };
+  if (!state.pid) throw new Error("dns-sd did not report a pid");
+  await writeFile(stateFile, `${canonicalJson(stripUndefined(state))}\n`, "utf8");
+  await sleep(250);
+  if (!isProcessRunning(state.pid)) {
+    await rm(stateFile, { force: true });
+    throw new Error("dns-sd advertiser exited immediately");
+  }
+  return state;
+}
+
+export async function readMdnsAdvertiserStatus(input: { stateDir: string }): Promise<MdnsAdvertiserStatus> {
+  const stateFile = mdnsAdvertiserStatePath(input.stateDir);
+  let state: MdnsAdvertiserState;
+  try {
+    state = JSON.parse(await readFile(stateFile, "utf8")) as MdnsAdvertiserState;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { stateFile, running: false, reason: "not started" };
+    return { stateFile, running: false, reason: `cannot read state: ${(error as Error).message}` };
+  }
+  if (!state.pid) return { stateFile, running: false, state, reason: "state file is missing pid" };
+  return {
+    stateFile,
+    running: isProcessRunning(state.pid),
+    state,
+    reason: isProcessRunning(state.pid) ? undefined : "process is not running",
+  };
+}
+
+export async function stopMdnsAdvertiser(input: { stateDir: string }): Promise<MdnsAdvertiserStopResult> {
+  const status = await readMdnsAdvertiserStatus(input);
+  if (!status.state) {
+    await rm(status.stateFile, { force: true });
+    return { stateFile: status.stateFile, stopped: false, reason: status.reason ?? "not started" };
+  }
+  if (status.running) {
+    sendSignal(status.state.pid, "SIGTERM");
+    await waitForProcessExit(status.state.pid, 2000);
+    if (isProcessRunning(status.state.pid)) {
+      sendSignal(status.state.pid, "SIGKILL");
+      await waitForProcessExit(status.state.pid, 1000);
+    }
+  }
+  const stopped = !isProcessRunning(status.state.pid);
+  if (stopped) await rm(status.stateFile, { force: true });
+  return {
+    stateFile: status.stateFile,
+    stopped,
+    pid: status.state.pid,
+    reason: stopped ? undefined : "process is still running",
+  };
 }
 
 export async function discoverMdnsPeers(input: { timeoutMs?: number; filter?: DiscoveryFilter }): Promise<DiscoveryResult> {
@@ -463,6 +567,45 @@ async function runDnsSd(args: string[], timeoutMs: number): Promise<{ stdout: st
     if (stdout && (result.killed || result.signal === "SIGTERM")) return { stdout, warnings: [] };
     return { stdout, warnings: [`dns-sd ${args.join(" ")} failed: ${result.stderr?.trim() || result.message || result.code || "unknown error"}`] };
   }
+}
+
+function mdnsAdvertiseArgs(presence: PeerPresence): string[] {
+  const endpoint = parseTcpEndpoint(presence.endpoints[0].endpoint);
+  return ["-R", presence.name ?? presence.nodeId, MDNS_SERVICE, "local", String(endpoint.port), ...mdnsTxtForPresence(presence)];
+}
+
+function mdnsAdvertiserStatePath(stateDir: string): string {
+  return path.join(path.resolve(expandHome(stateDir)), MDNS_ADVERTISER_STATE_FILE);
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function sendSignal(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessRunning(pid)) return true;
+    await sleep(50);
+  }
+  return !isProcessRunning(pid);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function waitForMdnsAdvertiser(child: ChildProcess, durationMs: number | undefined): Promise<void> {
