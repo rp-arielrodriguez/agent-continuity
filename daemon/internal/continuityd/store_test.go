@@ -126,6 +126,134 @@ func TestSQLiteStoreBlocksReturnsEmptySliceForEmptyLane(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreAcceptsCollaborativeSchedulerBlocks(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	orchestrator := newTestSigner(t, "a0263", "scheduler")
+	worker := newTestSigner(t, "mac-studio", "worker")
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "scheduler-runtime", LaneID: "scheduler"}
+
+	bootstrap := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "bootstrap",
+		ParentTips: []string{},
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-05T22:00:00.000Z",
+		Payload: map[string]any{
+			"summary": "Start scheduler lane.",
+		},
+	})
+	if result, err := store.AppendBlock(ctx, bootstrap, ""); err != nil || !result.Accepted {
+		t.Fatalf("bootstrap append failed: result=%+v err=%v", result, err)
+	}
+
+	intent := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_intent",
+		ParentTips: []string{bootstrap.BlockID},
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-05T22:01:00.000Z",
+		Payload: map[string]any{
+			"title":        "Run scheduler smoke",
+			"instructions": "Run a deterministic smoke.",
+			"requirements": map[string]any{
+				"agents": []any{"codex"},
+				"tools":  []any{"shell", "git"},
+			},
+		},
+	})
+	if result, err := store.AppendBlock(ctx, intent, ""); err != nil || !result.Accepted {
+		t.Fatalf("intent append failed: result=%+v err=%v", result, err)
+	}
+
+	profile := worker.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "worker_profile",
+		ParentTips: []string{intent.BlockID},
+		NodeID:     worker.nodeID,
+		ActorID:    worker.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-05T22:02:00.000Z",
+		Payload: map[string]any{
+			"workerId":      "mac-studio-codex",
+			"agent":         "codex",
+			"modelFamilies": []any{"gpt"},
+			"tools":         []any{"shell", "git"},
+		},
+	})
+	if result, err := store.AppendBlock(ctx, profile, ""); err != nil || !result.Accepted {
+		t.Fatalf("profile append failed: result=%+v err=%v", result, err)
+	}
+
+	assignment := worker.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_assignment",
+		ParentTips: []string{profile.BlockID},
+		NodeID:     worker.nodeID,
+		ActorID:    worker.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-05T22:03:00.000Z",
+		Payload: map[string]any{
+			"intentBlockId":  intent.BlockID,
+			"workerId":       "mac-studio-codex",
+			"assignedLaneId": "mac-studio-codex",
+			"mode":           "automatic",
+			"leaseUntil":     "2026-07-05T22:13:00.000Z",
+		},
+	})
+	if result, err := store.AppendBlock(ctx, assignment, ""); err != nil || !result.Accepted {
+		t.Fatalf("assignment append failed: result=%+v err=%v", result, err)
+	}
+
+	taskResult := worker.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_result",
+		ParentTips: []string{assignment.BlockID},
+		NodeID:     worker.nodeID,
+		ActorID:    worker.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-05T22:04:00.000Z",
+		Payload: map[string]any{
+			"intentBlockId":     intent.BlockID,
+			"assignmentBlockId": assignment.BlockID,
+			"workerId":          "mac-studio-codex",
+			"status":            "completed",
+			"summary":           "Scheduler smoke completed.",
+		},
+	})
+	result, err := store.AppendBlock(ctx, taskResult, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Accepted || result.Lane.Tip != taskResult.BlockID {
+		t.Fatalf("result append rejected: %+v", result)
+	}
+}
+
 func TestSQLiteStoreTrustedPeersLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")

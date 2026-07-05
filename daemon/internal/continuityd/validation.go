@@ -35,6 +35,33 @@ func validCheckpointStatus(value string) bool {
 	}
 }
 
+func validTaskPolicy(value string) bool {
+	switch value {
+	case "exclusive", "speculative":
+		return true
+	default:
+		return false
+	}
+}
+
+func validTaskAssignmentMode(value string) bool {
+	switch value {
+	case "manual", "automatic":
+		return true
+	default:
+		return false
+	}
+}
+
+func validTaskResultStatus(value string) bool {
+	switch value {
+	case "completed", "failed", "blocked", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
 func appendIssue(issues []Rejection, code string, message string) []Rejection {
 	return append(issues, Rejection{Code: code, Message: message})
 }

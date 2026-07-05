@@ -18,6 +18,7 @@ export * from "./rendezvous-backend.js";
 export * from "./schema.js";
 export * from "./setup.js";
 export * from "./signer-store.js";
+export * from "./scheduler.js";
 export * from "./store.js";
 export * from "./types.js";
 export * from "./workflow.js";

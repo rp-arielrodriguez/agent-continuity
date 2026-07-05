@@ -48,6 +48,8 @@ func ValidateBlockTransition(block TaskBlock, ctx TransitionContext) TransitionR
 		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
 	case "reconcile":
 		return validateReconcile(block, ctx)
+	case "task_intent", "worker_profile", "task_assignment", "task_result":
+		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
 	default:
 		return reject(ActionReconcile, "invalid_block", "unsupported task block kind "+block.Kind)
 	}

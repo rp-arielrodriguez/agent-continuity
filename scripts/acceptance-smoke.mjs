@@ -14,6 +14,7 @@ const cli = path.join(root, "dist/src/cli.js");
 const daemonBinary = path.join(root, "dist/bin/continuityd");
 const projectId = "rp-arielrodriguez/agent-continuity-acceptance";
 const taskId = "acceptance-smoke";
+const schedulerTaskId = "scheduler-acceptance-smoke";
 
 await assertBuilt();
 
@@ -38,6 +39,7 @@ try {
   const source = daemonPaths(tmp, "source");
   const target = daemonPaths(tmp, "target");
   const sourceEndpoint = `tcp://127.0.0.1:${sourcePort}`;
+  const targetEndpoint = `tcp://127.0.0.1:${targetPort}`;
 
   await scenario("start two temporary daemons with read-only peer listeners", async () => {
     processes.push(await startDaemon(daemonBinary, source, sourcePort));
@@ -367,6 +369,133 @@ try {
     const repeatResult = JSON.parse(repeat.stdout);
     assertEqual(repeatResult.insertedBlocks, 0, "expected repeat sync to be idempotent");
     assertEqual(repeatResult.rejectedBlocks, 0, "expected no rejected blocks on repeat sync");
+  });
+
+  await scenario("distributed scheduler task is executed on target and synced back to source", async () => {
+    const submitted = await run([
+      "scheduler-task-submit",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      schedulerTaskId,
+      "--lane-id",
+      "scheduler",
+      "--title",
+      "Distributed scheduler smoke",
+      "--instructions",
+      "Use the fake worker to produce a deterministic result.",
+      "--requires-agents",
+      "codex",
+      "--requires-model-families",
+      "gpt",
+      "--requires-tools",
+      "shell,git",
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-orchestrator",
+      "--now",
+      "2026-07-05T21:10:00.000Z",
+      "--json",
+    ], { env });
+    const submittedResult = JSON.parse(submitted.stdout);
+    assertIncludes(submittedResult.block.blockId, "blk_");
+
+    const targetInitialSync = await run([
+      "peer-sync",
+      "--socket",
+      target.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      schedulerTaskId,
+      "--lane-id",
+      "scheduler",
+      "--json",
+    ], { env });
+    const targetInitialSyncResult = JSON.parse(targetInitialSync.stdout);
+    assertAtLeast(targetInitialSyncResult.insertedBlocks, 2, "expected target to import scheduler bootstrap and intent");
+    assertEqual(targetInitialSyncResult.rejectedBlocks, 0, "expected no target scheduler sync rejections");
+
+    const targetRun = await run([
+      "scheduler-run-once",
+      "--socket",
+      target.socket,
+      "--state-dir",
+      target.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      schedulerTaskId,
+      "--lane-id",
+      "scheduler",
+      "--worker-id",
+      "target-codex",
+      "--agent",
+      "codex",
+      "--model-families",
+      "gpt",
+      "--tools",
+      "shell,git",
+      "--node-id",
+      "target-node",
+      "--actor-id",
+      "target-worker",
+      "--now",
+      "2026-07-05T21:11:00.000Z",
+      "--json",
+    ], { env });
+    const targetRunResult = JSON.parse(targetRun.stdout);
+    assertEqual(targetRunResult.status, "completed", "expected target worker to complete scheduler task");
+    assertIncludes(targetRunResult.resultBlock.blockId, "blk_");
+
+    await run([
+      "peer-add",
+      "--socket",
+      source.socket,
+      "--endpoint",
+      targetEndpoint,
+      "--name",
+      "target-node",
+      "--provider",
+      "acceptance",
+    ], { env });
+
+    const sourceResultSync = await run([
+      "peer-sync",
+      "--socket",
+      source.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      schedulerTaskId,
+      "--lane-id",
+      "scheduler",
+      "--json",
+    ], { env });
+    const sourceResultSyncResult = JSON.parse(sourceResultSync.stdout);
+    assertAtLeast(sourceResultSyncResult.insertedBlocks, 3, "expected source to import worker profile, assignment, and result");
+    assertEqual(sourceResultSyncResult.rejectedBlocks, 0, "expected no source scheduler result sync rejections");
+
+    const dashboard = await run([
+      "scheduler-dashboard",
+      "--socket",
+      source.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      schedulerTaskId,
+      "--lane-id",
+      "scheduler",
+      "--json",
+    ], { env });
+    const dashboardResult = JSON.parse(dashboard.stdout);
+    assertEqual(dashboardResult.counts.completed, 1, "expected source scheduler dashboard to show completed task");
+    assertEqual(dashboardResult.results[0].payload.workerId, "target-codex", "expected result to come from target worker");
   });
 
   console.log("\nacceptance-smoke: passed");

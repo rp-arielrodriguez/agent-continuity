@@ -31,10 +31,20 @@ import {
 } from "./peer-onboarding.js";
 import { inferProjectId } from "./project.js";
 import { discoverRendezvousPeersFromTarget, publishRendezvousPresenceToTarget, type RendezvousTarget } from "./rendezvous-backend.js";
+import {
+  loadSchedulerState,
+  registerWorkerProfile,
+  renderSchedulerDashboard,
+  runSchedulerOnce,
+  submitTaskIntent,
+  submitTaskResult,
+  type SchedulerRunner,
+} from "./scheduler.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
+import type { TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
 
 interface ParsedArgs {
   command: string;
@@ -264,6 +274,130 @@ Summary: ${taskId} imported ${result.imported} new journal entries
 
       if (parsed.options.json) console.log(JSON.stringify(snapshot, null, 2));
       else console.log(renderDashboard(snapshot).trimEnd());
+      return;
+    }
+    case "scheduler-dashboard": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const sync = parsed.options.sync === true ? await provider.syncTrustedPeers(ref) : undefined;
+      const state = await loadSchedulerState(provider, ref);
+      if (parsed.options.json) console.log(JSON.stringify({ ...state, sync }, null, 2));
+      else {
+        if (sync) console.log(`sync: inserted ${sync.insertedBlocks}, rejected ${sync.rejectedBlocks}`);
+        console.log(renderSchedulerDashboard(state).trimEnd());
+      }
+      return;
+    }
+    case "scheduler-worker-register": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-worker-cli");
+      const block = await registerWorkerProfile({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        createdAt: stringOption(parsed, "now"),
+        payload: workerProfilePayload(parsed),
+      });
+      const output = { block, keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`worker: ${block.payload.workerId}`);
+        console.log(`agent: ${block.payload.agent}`);
+        console.log(`block: ${block.blockId}`);
+        console.log(`tip: ${block.blockId}`);
+        if (block.payload.tmuxSession) console.log(`tmux: ${block.payload.tmuxSession}`);
+      }
+      return;
+    }
+    case "scheduler-task-submit": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-orchestrator-cli");
+      const instructions = await instructionsOption(parsed);
+      const block = await submitTaskIntent({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        createdAt: stringOption(parsed, "now"),
+        payload: {
+          title: requiredOption(parsed, "title"),
+          instructions,
+          targetLaneId: stringOption(parsed, "target-lane-id"),
+          policy: schedulerPolicyOption(parsed),
+          priority: numberOption(parsed, "priority"),
+          requirements: schedulerRequirementsOption(parsed),
+          idempotencyKey: stringOption(parsed, "idempotency-key"),
+        },
+      });
+      const output = { block, keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`task: ${block.payload.title}`);
+        console.log(`block: ${block.blockId}`);
+        console.log(`policy: ${block.payload.policy ?? "exclusive"}`);
+        console.log(`tip: ${block.blockId}`);
+      }
+      return;
+    }
+    case "scheduler-run-once": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const sync = parsed.options.sync === true ? await provider.syncTrustedPeers(ref) : undefined;
+      const signer = await signerFromOptions(parsed, config, "scheduler-worker-cli");
+      const result = await runSchedulerOnce({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        worker: workerProfilePayload(parsed),
+        runner: schedulerRunnerOption(parsed),
+        command: stringOption(parsed, "command"),
+        tmuxSession: stringOption(parsed, "tmux-session"),
+        keepTmuxSession: parsed.options["kill-tmux-session"] === true ? false : undefined,
+        runnerTimeoutMs: numberOption(parsed, "runner-timeout-ms"),
+        now: stringOption(parsed, "now"),
+        leaseMs: numberOption(parsed, "lease-ms"),
+      });
+      const output = { ...result, sync, keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        if (sync) console.log(`sync: inserted ${sync.insertedBlocks}, rejected ${sync.rejectedBlocks}`);
+        console.log(`worker: ${result.workerId}`);
+        console.log(`status: ${result.status}`);
+        if (result.intent) console.log(`intent: ${result.intent.blockId} (${result.intent.payload.title})`);
+        if (result.assignmentBlock) console.log(`assignment: ${result.assignmentBlock.blockId}`);
+        if (result.resultBlock) console.log(`result: ${result.resultBlock.blockId}`);
+        console.log(`summary: ${result.summary}`);
+      }
+      return;
+    }
+    case "scheduler-result": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-worker-cli");
+      const block = await submitTaskResult({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        createdAt: stringOption(parsed, "now"),
+        payload: {
+          intentBlockId: requiredOption(parsed, "intent-block-id"),
+          assignmentBlockId: stringOption(parsed, "assignment-block-id"),
+          workerId: requiredOption(parsed, "worker-id"),
+          status: schedulerResultStatusOption(parsed),
+          summary: requiredOption(parsed, "summary"),
+          artifacts: listOrUndefined(parsed, "artifacts"),
+          exitCode: numberOption(parsed, "exit-code"),
+          tmuxSession: stringOption(parsed, "tmux-session"),
+        },
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ block, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`worker: ${block.payload.workerId}`);
+        console.log(`status: ${block.payload.status}`);
+        console.log(`result: ${block.blockId}`);
+        console.log(`summary: ${block.payload.summary}`);
+      }
       return;
     }
     case "peer-add": {
@@ -862,6 +996,14 @@ function localDaemonProvider(parsed: ParsedArgs, config: ContinuityConfig): Loca
   return new LocalDaemonProvider({ socketPath: daemon.socketPath, timeoutMs: numberOption(parsed, "timeout-ms") });
 }
 
+async function schedulerLaneRef(parsed: ParsedArgs): Promise<{ projectId: string; taskId: string; laneId: string }> {
+  return {
+    projectId: await projectIdOption(parsed),
+    taskId: requiredOption(parsed, "task-id"),
+    laneId: stringOption(parsed, "lane-id") ?? "scheduler",
+  };
+}
+
 async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, actorId: string): Promise<Awaited<ReturnType<typeof loadOrCreateNodeSigner>>> {
   const daemon = daemonRuntimeFromOptions(parsed, config);
   return loadOrCreateNodeSigner({
@@ -870,6 +1012,63 @@ async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, a
     nodeId: stringOption(parsed, "node-id"),
     actorId: stringOption(parsed, "actor-id") ?? actorId,
   });
+}
+
+function workerProfilePayload(parsed: ParsedArgs): WorkerProfilePayload {
+  return {
+    workerId: requiredOption(parsed, "worker-id"),
+    agent: requiredOption(parsed, "agent"),
+    modelFamilies: listOrUndefined(parsed, "model-families"),
+    models: listOrUndefined(parsed, "models"),
+    tools: listOrUndefined(parsed, "tools"),
+    maxConcurrent: numberOption(parsed, "max-concurrent"),
+    tmuxSession: stringOption(parsed, "tmux-session"),
+    endpoint: stringOption(parsed, "endpoint"),
+    enabled: parsed.options.disabled === true ? false : true,
+  };
+}
+
+async function instructionsOption(parsed: ParsedArgs): Promise<string> {
+  const instructions = stringOption(parsed, "instructions");
+  const instructionsFile = stringOption(parsed, "instructions-file");
+  if (instructions && instructionsFile) throw new Error("--instructions and --instructions-file cannot be combined");
+  const value = instructionsFile ? await readFile(instructionsFile, "utf8") : instructions;
+  if (!value?.trim()) throw new Error("missing required option --instructions or --instructions-file");
+  return value;
+}
+
+function schedulerRequirementsOption(parsed: ParsedArgs): TaskIntentPayload["requirements"] | undefined {
+  const requirements = {
+    agents: listOrUndefined(parsed, "requires-agents"),
+    modelFamilies: listOrUndefined(parsed, "requires-model-families"),
+    models: listOrUndefined(parsed, "requires-models"),
+    tools: listOrUndefined(parsed, "requires-tools"),
+  };
+  return Object.values(requirements).some(Boolean) ? requirements : undefined;
+}
+
+function schedulerPolicyOption(parsed: ParsedArgs): TaskIntentPayload["policy"] | undefined {
+  const policy = stringOption(parsed, "policy");
+  if (policy === undefined) return undefined;
+  if (policy === "exclusive" || policy === "speculative") return policy;
+  throw new Error(`unsupported --policy ${policy}; expected exclusive or speculative`);
+}
+
+function schedulerRunnerOption(parsed: ParsedArgs): SchedulerRunner {
+  const runner = stringOption(parsed, "runner") ?? "fake";
+  if (runner === "fake" || runner === "command" || runner === "tmux") return runner;
+  throw new Error(`unsupported --runner ${runner}; expected fake, command, or tmux`);
+}
+
+function schedulerResultStatusOption(parsed: ParsedArgs): TaskResultPayload["status"] {
+  const status = stringOption(parsed, "status") ?? "completed";
+  if (status === "completed" || status === "failed" || status === "blocked" || status === "cancelled") return status;
+  throw new Error(`unsupported --status ${status}; expected completed, failed, blocked, or cancelled`);
+}
+
+function listOrUndefined(parsed: ParsedArgs, name: string): string[] | undefined {
+  const values = listOption(parsed, name);
+  return values.length > 0 ? values : undefined;
 }
 
 function requiredOption(parsed: ParsedArgs, name: string): string {
@@ -999,6 +1198,11 @@ Commands:
   checkpoint  Append a journal entry and rewrite canon through Absurd
   doctor      Verify CLI, runtime, database schemas, queue, and integrations
   dashboard   Render a tmux-friendly continuityd lane dashboard
+  scheduler-dashboard Render scheduler queue, workers, assignments, and results
+  scheduler-task-submit Submit a task intent into a scheduler lane
+  scheduler-worker-register Register a worker profile in a scheduler lane
+  scheduler-run-once Sync optionally, claim one runnable task, and publish a result
+  scheduler-result Publish a manual task result for an assignment
   daemon-install Build/install the local continuityd daemon binary
   daemon-start Start continuityd from configured or default daemon paths
   daemon-stop Stop continuityd from configured or default daemon paths
@@ -1046,6 +1250,10 @@ Examples:
   continuity resume --daemon --sync --task-id TASK
   continuity status --json
   continuity dashboard --project-id PROJECT --task-id TASK --lane-id main
+  continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
+  continuity scheduler-worker-register --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
+  continuity scheduler-run-once --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
+  continuity scheduler-dashboard --project-id PROJECT --task-id TASK --sync
   continuity peer-invite-create --endpoint tcp://10.44.110.222:9987
   continuity peer-invite-accept --invite 'continuity://peer?...'
   continuity presence-publish --rendezvous /shared/continuity --port 9987 --project-id PROJECT

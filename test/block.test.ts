@@ -94,3 +94,44 @@ test("rejects payloads that do not match their block kind", async () => {
     /progress must be a non-empty string/,
   );
 });
+
+test("validates scheduler block payloads", async () => {
+  const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+  const block = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "task_intent",
+      leaseEpoch: 0,
+      payload: {
+        title: "Run scheduler acceptance",
+        instructions: "Run deterministic acceptance test.",
+        requirements: {
+          agents: ["codex"],
+          modelFamilies: ["gpt"],
+          tools: ["shell", "git"],
+        },
+      },
+    },
+    signer,
+  );
+
+  assert.equal(validateTaskBlock(block).ok, true);
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "task_result",
+        leaseEpoch: 0,
+        payload: {
+          intentBlockId: "not-a-block",
+          workerId: "a0263-codex",
+          status: "completed",
+          summary: "Done.",
+        } as never,
+      },
+      signer,
+    ),
+    /intentBlockId must be a valid block id/,
+  );
+});

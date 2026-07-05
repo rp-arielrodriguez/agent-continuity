@@ -167,6 +167,102 @@ func requiredPayloadString(payload map[string]any, field string) error {
 	return nil
 }
 
+func payloadStringSlice(payload map[string]any, field string) ([]string, bool) {
+	value, ok := payload[field]
+	if !ok {
+		return nil, false
+	}
+	entries, ok := value.([]any)
+	if !ok {
+		return nil, true
+	}
+	output := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		text, ok := entry.(string)
+		if !ok || text == "" {
+			return nil, true
+		}
+		output = append(output, text)
+	}
+	return output, false
+}
+
+func optionalPayloadStringSlice(payload map[string]any, field string) error {
+	_, invalid := payloadStringSlice(payload, field)
+	if invalid {
+		return errors.New(field + " must contain non-empty strings when provided")
+	}
+	return nil
+}
+
+func optionalPayloadInteger(payload map[string]any, field string) error {
+	value, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	number, ok := value.(float64)
+	if !ok || number != float64(int64(number)) {
+		return errors.New(field + " must be an integer when provided")
+	}
+	return nil
+}
+
+func optionalPayloadBool(payload map[string]any, field string) error {
+	value, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	if _, ok := value.(bool); !ok {
+		return errors.New(field + " must be a boolean when provided")
+	}
+	return nil
+}
+
+func requiredPayloadBlockID(payload map[string]any, field string) error {
+	value := payloadString(payload, field)
+	if !validBlockID(value) {
+		return errors.New(field + " must be a valid block id")
+	}
+	return nil
+}
+
+func optionalPayloadBlockID(payload map[string]any, field string) error {
+	value, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	text, ok := value.(string)
+	if !ok || !validBlockID(text) {
+		return errors.New(field + " must be a valid block id when provided")
+	}
+	return nil
+}
+
+func optionalPayloadTimestamp(payload map[string]any, field string) error {
+	value := payloadString(payload, field)
+	if value != "" && !validTimestamp(value) {
+		return errors.New(field + " must be an ISO timestamp when provided")
+	}
+	return nil
+}
+
+func optionalTaskRequirements(payload map[string]any) error {
+	value, ok := payload["requirements"]
+	if !ok {
+		return nil
+	}
+	requirements, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("requirements must be an object when provided")
+	}
+	for _, field := range []string{"agents", "modelFamilies", "models", "tools"} {
+		if err := optionalPayloadStringSlice(requirements, field); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func validatePayload(kind string, payload map[string]any) []Rejection {
 	var issues []Rejection
 	switch kind {
@@ -226,6 +322,86 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 			if !ok || !validBlockID(text) {
 				issues = appendIssue(issues, "invalid_kind_payload", "conflictingTips must contain valid block ids")
 				break
+			}
+		}
+	case "task_intent":
+		if err := requiredPayloadString(payload, "title"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "instructions"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if policy := payloadString(payload, "policy"); policy != "" && !validTaskPolicy(policy) {
+			issues = appendIssue(issues, "invalid_kind_payload", "policy must be one of exclusive, speculative")
+		}
+		if err := optionalPayloadInteger(payload, "priority"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalTaskRequirements(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+	case "worker_profile":
+		if err := requiredPayloadString(payload, "workerId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "agent"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		for _, field := range []string{"modelFamilies", "models", "tools"} {
+			if err := optionalPayloadStringSlice(payload, field); err != nil {
+				issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+			}
+		}
+		if err := optionalPayloadInteger(payload, "maxConcurrent"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadBool(payload, "enabled"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+	case "task_assignment":
+		if err := requiredPayloadBlockID(payload, "intentBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "workerId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "assignedLaneId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if mode := payloadString(payload, "mode"); mode != "" && !validTaskAssignmentMode(mode) {
+			issues = appendIssue(issues, "invalid_kind_payload", "mode must be one of manual, automatic")
+		}
+		if err := optionalPayloadTimestamp(payload, "leaseUntil"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+	case "task_result":
+		if err := requiredPayloadBlockID(payload, "intentBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadBlockID(payload, "assignmentBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "workerId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "status"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if status := payloadString(payload, "status"); status != "" && !validTaskResultStatus(status) {
+			issues = appendIssue(issues, "invalid_kind_payload", "status must be a known task result status")
+		}
+		if err := requiredPayloadString(payload, "summary"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadStringSlice(payload, "artifacts"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadInteger(payload, "exitCode"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		for _, field := range []string{"startedAt", "completedAt"} {
+			if err := optionalPayloadTimestamp(payload, field); err != nil {
+				issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 			}
 		}
 	default:

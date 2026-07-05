@@ -17,7 +17,11 @@ export type TaskBlockKind =
   | "handoff"
   | "release"
   | "pause"
-  | "reconcile";
+  | "reconcile"
+  | "task_intent"
+  | "worker_profile"
+  | "task_assignment"
+  | "task_result";
 
 const TASK_BLOCK_KINDS = new Set<string>([
   "bootstrap",
@@ -30,9 +34,16 @@ const TASK_BLOCK_KINDS = new Set<string>([
   "release",
   "pause",
   "reconcile",
+  "task_intent",
+  "worker_profile",
+  "task_assignment",
+  "task_result",
 ]);
 
 const CHECKPOINT_STATUSES = new Set<string>(["pending", "in_progress", "blocked", "completed", "cancelled"]);
+const TASK_POLICIES = new Set<string>(["exclusive", "speculative"]);
+const TASK_ASSIGNMENT_MODES = new Set<string>(["manual", "automatic"]);
+const TASK_RESULT_STATUSES = new Set<string>(["completed", "failed", "blocked", "cancelled"]);
 
 export interface LaneRef {
   projectId: string;
@@ -73,7 +84,11 @@ export type TaskBlockPayload =
   | HandoffPayload
   | ReleasePayload
   | PausePayload
-  | ReconcilePayload;
+  | ReconcilePayload
+  | TaskIntentPayload
+  | WorkerProfilePayload
+  | TaskAssignmentPayload
+  | TaskResultPayload;
 
 export interface BootstrapPayload {
   summary: string;
@@ -135,6 +150,56 @@ export interface ReconcilePayload {
   conflictingTips: string[];
   canonMarkdown?: string;
   inventoryMarkdown?: string;
+}
+
+export interface TaskIntentRequirements {
+  agents?: string[];
+  modelFamilies?: string[];
+  models?: string[];
+  tools?: string[];
+}
+
+export interface TaskIntentPayload {
+  title: string;
+  instructions: string;
+  targetLaneId?: string;
+  policy?: "exclusive" | "speculative";
+  priority?: number;
+  requirements?: TaskIntentRequirements;
+  idempotencyKey?: string;
+}
+
+export interface WorkerProfilePayload {
+  workerId: string;
+  agent: string;
+  modelFamilies?: string[];
+  models?: string[];
+  tools?: string[];
+  maxConcurrent?: number;
+  tmuxSession?: string;
+  endpoint?: string;
+  enabled?: boolean;
+}
+
+export interface TaskAssignmentPayload {
+  intentBlockId: string;
+  workerId: string;
+  assignedLaneId: string;
+  mode?: "manual" | "automatic";
+  leaseUntil?: string;
+}
+
+export interface TaskResultPayload {
+  intentBlockId: string;
+  assignmentBlockId?: string;
+  workerId: string;
+  status: "completed" | "failed" | "blocked" | "cancelled";
+  summary: string;
+  artifacts?: string[];
+  exitCode?: number;
+  startedAt?: string;
+  completedAt?: string;
+  tmuxSession?: string;
 }
 
 export interface ContinuitySigner extends ActorRef {
@@ -416,6 +481,48 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalString(payload, "canonMarkdown", issues);
       optionalString(payload, "inventoryMarkdown", issues);
       break;
+    case "task_intent":
+      requireString(payload, "title", issues);
+      requireString(payload, "instructions", issues);
+      optionalString(payload, "targetLaneId", issues);
+      optionalEnum(payload, "policy", TASK_POLICIES, issues);
+      optionalInteger(payload, "priority", issues);
+      optionalRequirements(payload, issues);
+      optionalString(payload, "idempotencyKey", issues);
+      break;
+    case "worker_profile":
+      requireString(payload, "workerId", issues);
+      requireString(payload, "agent", issues);
+      optionalStringArray(payload, "modelFamilies", issues);
+      optionalStringArray(payload, "models", issues);
+      optionalStringArray(payload, "tools", issues);
+      optionalInteger(payload, "maxConcurrent", issues);
+      optionalString(payload, "tmuxSession", issues);
+      optionalString(payload, "endpoint", issues);
+      optionalBoolean(payload, "enabled", issues);
+      break;
+    case "task_assignment":
+      requireBlockId(payload, "intentBlockId", issues);
+      requireString(payload, "workerId", issues);
+      requireString(payload, "assignedLaneId", issues);
+      optionalEnum(payload, "mode", TASK_ASSIGNMENT_MODES, issues);
+      optionalTimestamp(payload, "leaseUntil", issues);
+      break;
+    case "task_result":
+      requireBlockId(payload, "intentBlockId", issues);
+      optionalBlockId(payload, "assignmentBlockId", issues);
+      requireString(payload, "workerId", issues);
+      requireString(payload, "status", issues);
+      if (typeof (payload as TaskResultPayload).status === "string" && !TASK_RESULT_STATUSES.has((payload as TaskResultPayload).status)) {
+        issues.push(issue("invalid_kind_payload", "status must be a known task result status"));
+      }
+      requireString(payload, "summary", issues);
+      optionalStringArray(payload, "artifacts", issues);
+      optionalInteger(payload, "exitCode", issues);
+      optionalTimestamp(payload, "startedAt", issues);
+      optionalTimestamp(payload, "completedAt", issues);
+      optionalString(payload, "tmuxSession", issues);
+      break;
   }
   return { ok: issues.length === 0, issues };
 }
@@ -472,6 +579,63 @@ function optionalString(payload: TaskBlockPayload, field: string, issues: BlockV
   if (value !== undefined && typeof value !== "string") {
     issues.push(issue("invalid_kind_payload", `${field} must be a string when provided`));
   }
+}
+
+function requireBlockId(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (typeof value !== "string" || !isBlockId(value)) {
+    issues.push(issue("invalid_kind_payload", `${field} must be a valid block id`));
+  }
+}
+
+function optionalBlockId(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value !== undefined && (typeof value !== "string" || !isBlockId(value))) {
+    issues.push(issue("invalid_kind_payload", `${field} must be a valid block id when provided`));
+  }
+}
+
+function optionalStringArray(payload: TaskBlockPayload | Record<string, unknown>, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === "")) {
+    issues.push(issue("invalid_kind_payload", `${field} must contain non-empty strings when provided`));
+  }
+}
+
+function optionalBoolean(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value !== undefined && typeof value !== "boolean") {
+    issues.push(issue("invalid_kind_payload", `${field} must be a boolean when provided`));
+  }
+}
+
+function optionalInteger(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value !== undefined && (!Number.isSafeInteger(value) || typeof value !== "number")) {
+    issues.push(issue("invalid_kind_payload", `${field} must be a safe integer when provided`));
+  }
+}
+
+function optionalEnum(payload: TaskBlockPayload, field: string, allowed: Set<string>, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value !== undefined && (typeof value !== "string" || !allowed.has(value))) {
+    issues.push(issue("invalid_kind_payload", `${field} must be one of ${[...allowed].join(", ")}`));
+  }
+}
+
+function optionalRequirements(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).requirements;
+  if (value === undefined) return;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    issues.push(issue("invalid_kind_payload", "requirements must be an object when provided"));
+    return;
+  }
+  const requirements = value as Record<string, unknown>;
+  optionalStringArray(requirements, "agents", issues);
+  optionalStringArray(requirements, "modelFamilies", issues);
+  optionalStringArray(requirements, "models", issues);
+  optionalStringArray(requirements, "tools", issues);
 }
 
 function requireTimestamp(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {

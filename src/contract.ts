@@ -91,6 +91,11 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
       return validateTipExtendingBlock(block, current, "pause");
     case "reconcile":
       return validateReconcile(block, current, context);
+    case "task_intent":
+    case "worker_profile":
+    case "task_assignment":
+    case "task_result":
+      return validateTipExtendingBlock(block, current, block.kind);
   }
 }
 
@@ -162,6 +167,11 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
       if (payload.inventoryMarkdown) next.inventoryMarkdown = payload.inventoryMarkdown;
       break;
     }
+    case "task_intent":
+    case "worker_profile":
+    case "task_assignment":
+    case "task_result":
+      break;
   }
 
   return next;
