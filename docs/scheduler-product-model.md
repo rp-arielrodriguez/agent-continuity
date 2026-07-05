@@ -1,0 +1,170 @@
+# Scheduler Product Model
+
+Continuity should support both interactive agent continuity and automatic
+scheduling. The same signed task history must serve both modes.
+
+## Two Usage Modes
+
+```text
+interactive mode
+  human starts Codex, Claude, or OpenCode
+  agent uses continuity resume/checkpoint/sync
+  human decides who works on what
+
+scheduled mode
+  scheduler receives task intents
+  scheduler claims tasks, launches workers, and monitors checkpoints
+  human can observe or attach to sessions
+```
+
+The scheduler is a layer above `continuityd`. `continuityd` owns signed blocks,
+peer sync, trust, leases, and projections. The scheduler owns task assignment and
+local runner supervision.
+
+## Agent, Model, And Tool Capabilities
+
+Do not model an agent as if it were a model. Agents are harnesses. Models are
+provider-backed or local inference capabilities. Tools are interfaces exposed by
+the harness.
+
+```yaml
+workers:
+  - id: codex-main
+    agent: codex
+    modelFamilies: [openai]
+    models: [gpt-5]
+    tools: [shell, git]
+    maxConcurrent: 2
+
+  - id: claude-deep
+    agent: claude
+    modelFamilies: [anthropic]
+    models: [sonnet, opus]
+    tools: [shell, git]
+    maxConcurrent: 1
+
+  - id: opencode-router
+    agent: opencode
+    modelFamilies: [openai, anthropic, local]
+    tools: [shell, git, browser]
+    maxConcurrent: 3
+
+  - id: local-qwen
+    agent: local-harness
+    modelFamilies: [local]
+    models: [qwen-coder]
+    tools: [shell, git]
+    enabled: false
+```
+
+`tools: [shell, git, browser]` means the task requires those harness
+capabilities. It does not mean the model is trained to use those tools, and it
+does not imply a provider. A browser-capable OpenCode worker may be eligible for
+a task that a shell-only Codex runner should not receive.
+
+## Task Intent
+
+```yaml
+taskIntent:
+  project: rp-arielrodriguez/agent-continuity
+  task: agent-continuity-decentralized-runtime
+  policy: exclusive
+  requires:
+    modelFamilies: [openai]
+    tools: [shell, git]
+    autonomy: high
+  limits:
+    maxRuntime: 2h
+    maxCostUsd: 20
+  isolation:
+    worktree: required
+    secrets: project-default
+```
+
+The scheduler should only launch a worker when the worker satisfies the task
+requirements and the local node is allowed to execute that project.
+
+## Execution Policies
+
+```text
+exclusive
+  one fresh claim wins
+  other nodes observe and do not start local work
+  stale claims can be reclaimed through lease rules
+
+speculative
+  multiple workers may run in isolated lanes/worktrees
+  each result is a candidate
+  an evaluator or human chooses the winner
+```
+
+The default should be `exclusive`. Speculative execution is useful, but it must
+be explicit because coding tasks have side effects.
+
+## tmux Role
+
+tmux is a local operator frontend, not distributed state.
+
+```text
+scheduler
+  starts Codex/Claude/OpenCode in tmux sessions
+
+continuity dashboard
+  lists workers, tasks, claims, checkpoints, and sessions
+
+continuity attach <worker-or-task>
+  attaches to the underlying tmux session
+```
+
+Continuity blocks remain the distributed source of truth. tmux is how a human
+sees or intervenes in a local runner.
+
+## Native-Feeling Agent Interface
+
+Models will not be trained on this local harness by default. The product should
+make Continuity feel native through a small repeated protocol:
+
+```text
+session starts
+  continuity resume --daemon --sync --project-id ... --task-id ...
+
+meaningful progress
+  continuity checkpoint --daemon --task-id ... --status in_progress ...
+
+blocked or complete
+  continuity checkpoint --daemon --task-id ... --status blocked|completed ...
+```
+
+CLI is the universal substrate because every coding agent can execute shell
+commands. Skills and hooks make that CLI protocol natural for each agent.
+MCP can be added later only where it provides a better client experience; it
+should not be required for core correctness.
+
+## Safety Rules
+
+- Accept task intents only from trusted issuers.
+- Route only approved projects on each node.
+- Never execute arbitrary shell payloads from peers by default.
+- Prefer isolated worktrees for scheduled tasks.
+- Keep secrets scoped by project and worker.
+- Enforce runtime and cost budgets before launching workers.
+- Checkpoint scheduler decisions as signed events.
+
+## Product Boundary
+
+```text
+continuityd
+  signed blocks, projections, peer sync, trust, leases
+
+scheduler
+  task intents, claims, worker selection, budgets
+
+runner adapters
+  Codex, Claude, OpenCode, local harness
+
+tmux frontend
+  observe, attach, intervene
+```
+
+The scheduler should be built on top of Continuity, not mixed into every agent
+adapter.

@@ -41,6 +41,9 @@ The product-grade decentralized runtime direction is documented in
 runtime now provides the provider-first path: signed task blocks, project/task
 and lane state, lease validation, peer sync, dashboard rendering, and a migration
 bridge from the existing PostgreSQL/Absurd state.
+Scheduler semantics and acceptance coverage are documented in
+[`docs/scheduler-product-model.md`](docs/scheduler-product-model.md) and
+[`docs/acceptance-matrix.md`](docs/acceptance-matrix.md).
 
 The SDK pieces are available from `agent-continuity/sdk`: signed task blocks,
 the transition validation contract, `MemoryProvider`, the persistent
@@ -419,6 +422,7 @@ npm test
 npm run build:daemon
 cd daemon && go test ./...
 npm run test:e2e
+npm run test:acceptance
 ```
 
 Database-backed integration checks are skipped unless
