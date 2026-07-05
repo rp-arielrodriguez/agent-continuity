@@ -18,6 +18,7 @@ import {
   discoverMdnsPeers,
   discoverRendezvousPeers,
   encodePeerInvite,
+  mdnsTxtForPresence,
   peerTrustInputFromDiscovery,
   peerTrustInputFromInvite,
   publishRendezvousPresence,
@@ -29,6 +30,7 @@ import {
   type DiscoveredOnboardingPeer,
 } from "./peer-onboarding.js";
 import { inferProjectId } from "./project.js";
+import { discoverRendezvousPeersFromTarget, publishRendezvousPresenceToTarget, type RendezvousTarget } from "./rendezvous-backend.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
@@ -380,6 +382,49 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       else printOnboardingDiscovery("rendezvous", result.peers, result.warnings, trusted.length);
       return;
     }
+    case "rendezvous-publish": {
+      const signer = await signerFromOptions(parsed, config, "rendezvous-cli");
+      const presence = await createPeerPresence(
+        {
+          endpoints: publishEndpointListOption(parsed).map((endpoint) => ({ endpoint, provider: stringOption(parsed, "provider") })),
+          name: stringOption(parsed, "name") ?? defaultPresenceName(),
+          projects: projectListOption(parsed),
+          expiresAt: stringOption(parsed, "expires-at"),
+          updatedAt: stringOption(parsed, "now"),
+        },
+        signer.signer,
+      );
+      const result = await publishRendezvousPresenceToTarget({
+        target: rendezvousTargetOption(parsed, config),
+        presence,
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, presence, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`rendezvous: ${result.backend}`);
+        if (result.file) console.log(`file: ${result.file}`);
+        if (result.url) console.log(`url: ${result.url}`);
+        if (result.worktree) console.log(`worktree: ${result.worktree}`);
+        if (result.branch) console.log(`branch: ${result.branch}`);
+        if (result.message) console.log(`message: ${result.message}`);
+        for (const endpoint of presence.endpoints) console.log(`endpoint: ${endpoint.endpoint}${endpoint.provider ? ` (${endpoint.provider})` : ""}`);
+      }
+      return;
+    }
+    case "rendezvous-discover": {
+      const filter = discoveryFilterOption(parsed);
+      if (parsed.options.add === true) requireTrustedFilterForAdd(filter);
+      const result = await discoverRendezvousPeersFromTarget({
+        target: rendezvousTargetOption(parsed, config),
+        filter,
+      });
+      const trusted = parsed.options.add === true ? await trustDiscoveredPeers(parsed, config, result.peers) : [];
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, trusted }, null, 2));
+      else {
+        printOnboardingDiscovery(`rendezvous:${result.backend}`, result.peers, result.warnings, trusted.length);
+        if (result.worktree) console.log(`worktree: ${result.worktree}`);
+      }
+      return;
+    }
     case "mdns-advertise": {
       const signer = await signerFromOptions(parsed, config, "mdns-cli");
       const presence = await createPeerPresence(
@@ -393,6 +438,28 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         signer.signer,
       );
       const durationMs = numberOption(parsed, "duration-ms");
+      if (parsed.options.daemon === true) {
+        if (durationMs !== undefined) throw new Error("--daemon cannot be combined with --duration-ms; stop it with mdns-advertise-stop --daemon");
+        const endpoint = presence.endpoints[0];
+        const state = await localDaemonProvider(parsed, config).startMdnsAdvertiser({
+          name: presence.name ?? presence.nodeId,
+          port: tcpEndpointPort(endpoint.endpoint),
+          txt: mdnsTxtForPresence(presence),
+          endpoint: endpoint.endpoint,
+          nodeId: presence.nodeId,
+          provider: endpoint.provider,
+          projects: presence.projects,
+          now: stringOption(parsed, "now"),
+        });
+        if (parsed.options.json) console.log(JSON.stringify({ state, presence, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+        else {
+          console.log("mDNS advertiser: started");
+          console.log("manager: daemon");
+          console.log(`name: ${state.name}`);
+          console.log(`endpoint: ${state.endpoint}`);
+        }
+        return;
+      }
       if (parsed.options.background === true) {
         if (durationMs !== undefined) throw new Error("--background cannot be combined with --duration-ms; stop it with mdns-advertise-stop");
         const state = await startMdnsAdvertiser({
@@ -418,12 +485,24 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       return;
     }
     case "mdns-advertise-status": {
+      if (parsed.options.daemon === true) {
+        const status = await localDaemonProvider(parsed, config).mdnsAdvertiserStatus();
+        if (parsed.options.json) console.log(JSON.stringify(status, null, 2));
+        else printDaemonMdnsAdvertiserStatus(status);
+        return;
+      }
       const status = await readMdnsAdvertiserStatus({ stateDir: daemonRuntimeFromOptions(parsed, config).stateDir });
       if (parsed.options.json) console.log(JSON.stringify(status, null, 2));
       else printMdnsAdvertiserStatus(status);
       return;
     }
     case "mdns-advertise-stop": {
+      if (parsed.options.daemon === true) {
+        const result = await localDaemonProvider(parsed, config).stopMdnsAdvertiser();
+        if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+        else console.log(`mDNS advertiser: ${result.stopped ? "stopped" : "not running"}`);
+        return;
+      }
       const result = await stopMdnsAdvertiser({ stateDir: daemonRuntimeFromOptions(parsed, config).stateDir });
       if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
       else {
@@ -817,6 +896,14 @@ function mdnsEndpointOption(parsed: ParsedArgs): string {
   return defaultMdnsEndpoint(port, stringOption(parsed, "host"));
 }
 
+function tcpEndpointPort(endpoint: string): number {
+  const url = new URL(endpoint);
+  if (url.protocol !== "tcp:" || !url.port) throw new Error(`expected tcp:// endpoint, got ${endpoint}`);
+  const port = Number(url.port);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error(`invalid endpoint port in ${endpoint}`);
+  return port;
+}
+
 function projectListOption(parsed: ParsedArgs): string[] | undefined {
   const projects = listOption(parsed, "project-ids");
   const project = stringOption(parsed, "project-id");
@@ -829,6 +916,26 @@ function discoveryFilterOption(parsed: ParsedArgs): DiscoveryFilter {
     projectId: stringOption(parsed, "project-id"),
     trustedNames: listOption(parsed, "trusted-names"),
     trustedNodeIds: listOption(parsed, "trusted-node-ids"),
+  };
+}
+
+function rendezvousTargetOption(parsed: ParsedArgs, config: ContinuityConfig): RendezvousTarget {
+  const backend = (stringOption(parsed, "backend") ?? "file") as RendezvousTarget["backend"];
+  if (backend !== "file" && backend !== "git" && backend !== "s3" && backend !== "https") {
+    throw new Error(`unsupported --backend ${backend}; expected file, git, s3, or https`);
+  }
+  return {
+    backend,
+    dir: stringOption(parsed, "dir") ?? stringOption(parsed, "rendezvous"),
+    repo: stringOption(parsed, "repo"),
+    branch: stringOption(parsed, "branch"),
+    worktree: stringOption(parsed, "worktree"),
+    url: stringOption(parsed, "url"),
+    stateDir: daemonRuntimeFromOptions(parsed, config).stateDir,
+    awsBin: stringOption(parsed, "aws-bin"),
+    s3EndpointUrl: stringOption(parsed, "s3-endpoint-url"),
+    s3Profile: stringOption(parsed, "s3-profile"),
+    httpToken: stringOption(parsed, "http-token"),
   };
 }
 
@@ -874,6 +981,14 @@ function printMdnsAdvertiserStatus(status: Awaited<ReturnType<typeof readMdnsAdv
   if (status.reason) console.log(`reason: ${status.reason}`);
 }
 
+function printDaemonMdnsAdvertiserStatus(status: Awaited<ReturnType<LocalDaemonProvider["mdnsAdvertiserStatus"]>>): void {
+  console.log(`mDNS advertiser: ${status.running ? "running" : "stopped"}`);
+  console.log("manager: daemon");
+  if (status.name) console.log(`name: ${status.name}`);
+  if (status.endpoint) console.log(`endpoint: ${status.endpoint}`);
+  if (status.startedAt) console.log(`startedAt: ${status.startedAt}`);
+}
+
 function printHelp(): void {
   console.log(`continuity <command>
 
@@ -897,9 +1012,11 @@ Commands:
   peer-invite-accept Trust a signed peer invite URL
   presence-publish Publish signed presence to a rendezvous directory
   presence-discover Discover signed peers from a rendezvous directory
+  rendezvous-publish Publish signed presence through file/git/s3/https rendezvous
+  rendezvous-discover Discover signed peers through file/git/s3/https rendezvous
   mdns-advertise Advertise signed peer presence with local DNS-SD
-  mdns-advertise-status Show background mDNS advertiser status
-  mdns-advertise-stop Stop background mDNS advertiser
+  mdns-advertise-status Show mDNS advertiser status
+  mdns-advertise-stop Stop mDNS advertiser
   mdns-discover Discover signed peer presence with local DNS-SD
   peer-discover Optional provider discovery for Tailscale/ZeroTier peers
   start       Start the configured local runtime
@@ -933,10 +1050,16 @@ Examples:
   continuity peer-invite-accept --invite 'continuity://peer?...'
   continuity presence-publish --rendezvous /shared/continuity --port 9987 --project-id PROJECT
   continuity presence-discover --rendezvous /shared/continuity --trusted-node-ids NODE --add
+  continuity rendezvous-publish --backend git --repo git@github.com:OWNER/REPO.git --branch continuity-rendezvous --dir rendezvous --port 9987
+  continuity rendezvous-discover --backend s3 --url s3://bucket/continuity --trusted-names macbook --add
+  continuity rendezvous-discover --backend https --url https://rendezvous.example/continuity --trusted-names macbook
   continuity mdns-advertise --port 9987
+  continuity mdns-advertise --daemon --port 9987
   continuity mdns-advertise --port 9987 --background
   continuity mdns-advertise-status
+  continuity mdns-advertise-status --daemon
   continuity mdns-advertise-stop
+  continuity mdns-advertise-stop --daemon
   continuity mdns-discover --trusted-names macbook --add
   continuity peer-add --endpoint tcp://100.64.0.2:9987 --name workstation
   continuity peer-sync --project-id PROJECT --task-id TASK

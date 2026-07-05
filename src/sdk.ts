@@ -14,6 +14,7 @@ export * from "./migration.js";
 export * from "./peer-onboarding.js";
 export * from "./provider.js";
 export * from "./project.js";
+export * from "./rendezvous-backend.js";
 export * from "./schema.js";
 export * from "./setup.js";
 export * from "./signer-store.js";

@@ -97,6 +97,36 @@ export interface PeerTrustRemoveResult {
   removed: boolean;
 }
 
+export interface MdnsAdvertiseStartInput {
+  name: string;
+  service?: string;
+  domain?: string;
+  port: number;
+  txt: string[];
+  endpoint: string;
+  nodeId: string;
+  provider?: string;
+  projects?: string[];
+  now?: string;
+}
+
+export interface MdnsAdvertiseState {
+  running: boolean;
+  name?: string;
+  service?: string;
+  domain?: string;
+  port?: number;
+  endpoint?: string;
+  nodeId?: string;
+  provider?: string;
+  projects?: string[];
+  startedAt?: string;
+}
+
+export interface MdnsAdvertiseStopResult {
+  stopped: boolean;
+}
+
 interface JsonRpcResponse<TResult> {
   jsonrpc: "2.0";
   id: string;
@@ -161,6 +191,18 @@ export class LocalDaemonProvider extends BaseContinuityProvider {
 
   async discoverPeers(input: PeerDiscoverInput): Promise<PeerDiscoverResult> {
     return this.client.call<PeerDiscoverResult>("peer.discover", input);
+  }
+
+  async startMdnsAdvertiser(input: MdnsAdvertiseStartInput): Promise<MdnsAdvertiseState> {
+    return this.client.call<MdnsAdvertiseState>("mdns.advertiseStart", input);
+  }
+
+  async mdnsAdvertiserStatus(): Promise<MdnsAdvertiseState> {
+    return this.client.call<MdnsAdvertiseState>("mdns.advertiseStatus", {});
+  }
+
+  async stopMdnsAdvertiser(): Promise<MdnsAdvertiseStopResult> {
+    return this.client.call<MdnsAdvertiseStopResult>("mdns.advertiseStop", {});
   }
 }
 

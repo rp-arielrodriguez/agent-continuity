@@ -11,10 +11,11 @@ import (
 
 type Server struct {
 	store *SQLiteStore
+	mdns  *MDNSAdvertiser
 }
 
 func NewServer(store *SQLiteStore) *Server {
-	return &Server{store: store}
+	return &Server{store: store, mdns: NewMDNSAdvertiser()}
 }
 
 func (s *Server) ServeUnix(ctx context.Context, socketPath string) error {
@@ -170,6 +171,20 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, rpcInvalidParams(err)
 		}
 		return DiscoverPeers(ctx, input)
+	case "mdns.advertiseStart":
+		var input MDNSAdvertiseStartInput
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		result, err := s.mdns.Start(input)
+		if errors.Is(err, ErrMDNSAdvertiserRunning) {
+			return nil, &rpcError{Code: -32000, Message: "mDNS advertiser is already running"}
+		}
+		return result, err
+	case "mdns.advertiseStatus":
+		return s.mdns.Status(), nil
+	case "mdns.advertiseStop":
+		return s.mdns.Stop(), nil
 	default:
 		return nil, &rpcError{Code: -32601, Message: "Method not found"}
 	}

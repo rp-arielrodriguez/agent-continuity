@@ -420,13 +420,15 @@ paths are reachability or rendezvous layers. Continuity identity is always
 `node_id + public key`.
 
 Current implementation note: signed peer invites, signed rendezvous presence,
-and mDNS/DNS-SD presence are provider-agnostic onboarding paths. Provider
-resolvers such as Tailscale/ZeroTier discovery are optional convenience only.
-Bulk discovery trust requires an explicit trusted name or node-id allowlist.
-Durable trust is stored separately in the local daemon address book with
-`peer.trustAdd`; `peer.syncTrusted` syncs only enabled address-book entries.
-Remote peers are served through an optional read-only TCP JSON-RPC listener;
-mutation RPCs remain available only on the local Unix control socket.
+and mDNS/DNS-SD presence are provider-agnostic onboarding paths. File, git,
+S3/R2-compatible object storage, and private HTTPS rendezvous are transport
+adapters for the same signed presence payload. Provider resolvers such as
+Tailscale/ZeroTier discovery are optional convenience only. Bulk discovery trust
+requires an explicit trusted name or node-id allowlist. Durable trust is stored
+separately in the local daemon address book with `peer.trustAdd`;
+`peer.syncTrusted` syncs only enabled address-book entries. Remote peers are
+served through an optional read-only TCP JSON-RPC listener; mutation RPCs remain
+available only on the local Unix control socket.
 
 ## 11 - Sequence: Agent Connects Through Provider
 
@@ -957,6 +959,25 @@ Phase 15: provider-agnostic signed peer onboarding done
   Tailscale/ZeroTier convenience, but it is no longer the product's core peer
   onboarding model.
 
+Phase 16: first-class rendezvous adapters and daemon-managed mDNS done
+  src/rendezvous-backend.ts owns the provider-agnostic rendezvous adapter layer
+  for file, git, S3/R2-compatible object stores, and private HTTPS. The backends
+  persist or fetch the same signed presence files produced by
+  src/peer-onboarding.ts, so trust and filtering rules stay identical across
+  transports.
+  src/cli.ts exposes continuity rendezvous-publish and rendezvous-discover with
+  --backend file|git|s3|https. Git uses a cached worktree or explicit
+  --worktree, commits to --branch, and pushes; S3 uses aws s3 cp/sync and
+  accepts --s3-endpoint-url for R2-compatible stores; HTTPS uses authenticated
+  PUT for publish and index.json for discovery.
+  daemon/internal/continuityd owns an in-process mDNS advertiser behind
+  mdns.advertiseStart, mdns.advertiseStatus, and mdns.advertiseStop JSON-RPC
+  methods. src/daemon-provider.ts exposes the matching TypeScript API.
+  continuity mdns-advertise --daemon starts advertisement inside continuityd,
+  while mdns-advertise-status --daemon and mdns-advertise-stop --daemon manage
+  that daemon-owned registration. The prior foreground and --background DNS-SD
+  wrapper remains available for compatibility and local debugging.
+
 Hardening smoke: temporary daemon lifecycle done
   A temp continuityd process was started from dist/bin/continuityd, this task was
   migrated from PostgreSQL continuity into daemon SQLite through
@@ -994,11 +1015,13 @@ daemon/internal/continuityd/*_test.go
   JSON-RPC health and empty lane status over a Unix socket
   Tailscale/ZeroTier discovery parsing with explicit trust filters
   trusted peer address-book lifecycle
+  daemon-owned mDNS advertiser start/status/stop lifecycle with fake registrar
 
 test/daemon-provider.test.ts
   TypeScript LocalDaemonProvider health/status over Unix JSON-RPC
   signed bootstrap block construction and block.submit transport
   trusted peer sync and address-book JSON-RPC methods
+  daemon-owned mDNS advertiser JSON-RPC methods
 
 test/daemon-workflow.test.ts
   daemon checkpoint initializes lane and canon
@@ -1021,6 +1044,11 @@ test/peer-onboarding.test.ts
   mDNS TXT signed presence round-trip
   dns-sd browse/resolve output parsing
   bulk --add trust filter guard
+
+test/rendezvous-backend.test.ts
+  git rendezvous publish/discover through a temporary bare remote
+  HTTPS rendezvous authenticated PUT/index discovery behavior
+  S3-compatible rendezvous publish/discover through an aws CLI shim
 
 daemon/internal/continuityd/peer_test.go
   static Unix peer sync imports remote blocks in order
@@ -1069,6 +1097,8 @@ CLI output checks
   continuity peer-add/list/remove/sync/discover help and smoke commands inspected
   continuity peer-invite-create/accept, presence-publish/discover, and
   mdns-advertise/discover success and error paths inspected
+  continuity rendezvous-publish/discover backend smoke commands inspected
+  continuity mdns-advertise --daemon status/stop smoke commands inspected
   continuity install --target error and install --dry-run guard inspected
   continuity uninstall without database config inspected
   continuity checkpoint --daemon and resume --daemon temp daemon smoke inspected
@@ -1097,14 +1127,6 @@ peer challenge:
 
 HTML docs:
   generated only for local review vs checked into docs
-
-rendezvous backends:
-  file directory is implemented; git bare repo, S3/R2 object store, and small
-  private HTTPS rendezvous backends are still adapters to design
-
-mDNS runtime:
-  CLI DNS-SD integration is implemented; daemon-native advertisement/listening
-  can be added if long-running local network discovery becomes important
 ```
 
 Decisions already made and implemented:
@@ -1122,6 +1144,8 @@ resume --daemon --sync syncs trusted peers before printing canon
 signed peer invites before provider-specific resolvers
 signed rendezvous presence
 mDNS/DNS-SD local discovery
+git, S3/R2, and private HTTPS rendezvous adapters
+daemon-owned mDNS advertisement lifecycle
 provider-specific resolvers are optional convenience only
 markdown doc in repo, generated HTML outside repo
 ```

@@ -198,7 +198,8 @@ continuity resume \
 
 `peer-add`, `peer-list`, `peer-remove`, and `peer-sync` operate on the local
 daemon address book. Signed invite, signed rendezvous presence, and mDNS are the
-provider-agnostic onboarding paths:
+provider-agnostic onboarding paths. `presence-publish` and `presence-discover`
+are the direct file/directory primitives:
 
 ```bash
 # Shared directory, git checkout, bucket mount, NAS path, or private VPS path.
@@ -212,13 +213,72 @@ continuity presence-discover \
   --project-id rp-arielrodriguez/agent-continuity \
   --trusted-node-ids <NODE_ID> \
   --add
+```
 
+`rendezvous-publish` and `rendezvous-discover` wrap that signed presence model in
+first-class backends. Git stores presence files on a branch; S3 also covers
+S3-compatible providers such as R2 through `--s3-endpoint-url`; HTTPS reads
+`index.json` and can publish with authenticated `PUT`:
+
+```bash
+# Git-backed rendezvous. The default branch is continuity-rendezvous.
+continuity rendezvous-publish \
+  --backend git \
+  --repo git@github.com:OWNER/REPO.git \
+  --branch continuity-rendezvous \
+  --dir rendezvous \
+  --port 9987 \
+  --project-id rp-arielrodriguez/agent-continuity
+
+continuity rendezvous-discover \
+  --backend git \
+  --repo git@github.com:OWNER/REPO.git \
+  --branch continuity-rendezvous \
+  --dir rendezvous \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --trusted-names ariel-main \
+  --add
+
+# S3, R2, or another S3-compatible object store.
+continuity rendezvous-publish \
+  --backend s3 \
+  --url s3://bucket/continuity \
+  --s3-endpoint-url https://ACCOUNT_ID.r2.cloudflarestorage.com \
+  --port 9987
+
+continuity rendezvous-discover \
+  --backend s3 \
+  --url s3://bucket/continuity \
+  --s3-endpoint-url https://ACCOUNT_ID.r2.cloudflarestorage.com \
+  --trusted-names ariel-main \
+  --add
+
+# Private HTTPS rendezvous.
+continuity rendezvous-publish \
+  --backend https \
+  --url https://rendezvous.example/continuity \
+  --http-token "$CONTINUITY_RENDEZVOUS_TOKEN" \
+  --port 9987
+
+continuity rendezvous-discover \
+  --backend https \
+  --url https://rendezvous.example/continuity \
+  --trusted-names ariel-main \
+  --add
+```
+
+```bash
 # Local network discovery when DNS-SD is available.
 continuity mdns-advertise --port 9987 --name ariel-main
 continuity mdns-advertise --port 9987 --name ariel-main --background
 continuity mdns-advertise-status
 continuity mdns-advertise-stop
 continuity mdns-discover --trusted-names ariel-main --add
+
+# Daemon-managed mDNS advertisement. The daemon keeps the registration alive.
+continuity mdns-advertise --daemon --port 9987 --name ariel-main
+continuity mdns-advertise-status --daemon
+continuity mdns-advertise-stop --daemon
 ```
 
 `peer-discover --peer-port <PORT> --trusted-names <NAME> --add` remains an

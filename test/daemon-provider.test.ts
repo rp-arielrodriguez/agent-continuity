@@ -222,6 +222,54 @@ test("local daemon provider calls overlay peer discovery over JSON-RPC", async (
   });
 });
 
+test("local daemon provider manages daemon mDNS advertiser over JSON-RPC", async () => {
+  const calls: string[] = [];
+  await withRpcServer(async (request) => {
+    calls.push(request.method);
+    if (request.method === "mdns.advertiseStart") {
+      assert.deepEqual(request.params, {
+        name: "a0263",
+        port: 9987,
+        txt: ["txtvers=1"],
+        endpoint: "tcp://A0263.local:9987",
+        nodeId: "A0263.local",
+      });
+      return {
+        running: true,
+        name: "a0263",
+        endpoint: "tcp://A0263.local:9987",
+      };
+    }
+    if (request.method === "mdns.advertiseStatus") {
+      return {
+        running: true,
+        name: "a0263",
+        endpoint: "tcp://A0263.local:9987",
+      };
+    }
+    if (request.method === "mdns.advertiseStop") {
+      return { stopped: true };
+    }
+    throw new Error(`unexpected method ${request.method}`);
+  }, async (socketPath) => {
+    const provider = new LocalDaemonProvider({ socketPath });
+    const started = await provider.startMdnsAdvertiser({
+      name: "a0263",
+      port: 9987,
+      txt: ["txtvers=1"],
+      endpoint: "tcp://A0263.local:9987",
+      nodeId: "A0263.local",
+    });
+    const status = await provider.mdnsAdvertiserStatus();
+    const stopped = await provider.stopMdnsAdvertiser();
+
+    assert.equal(started.running, true);
+    assert.equal(status.endpoint, "tcp://A0263.local:9987");
+    assert.equal(stopped.stopped, true);
+    assert.deepEqual(calls, ["mdns.advertiseStart", "mdns.advertiseStatus", "mdns.advertiseStop"]);
+  });
+});
+
 test("unix json-rpc client waits for a complete newline-delimited response", async () => {
   const socketPath = path.join(os.tmpdir(), `continuityd-${randomUUID()}.sock`);
   const server = net.createServer({ allowHalfOpen: true }, (socket) => {
