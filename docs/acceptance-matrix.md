@@ -80,11 +80,12 @@ future
 | Scheduler queue | Task intents enter a daemon-backed scheduler lane | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
 | Background workers | Worker loop syncs trusted peers and runs newly submitted tasks without prompt paste | local-e2e | acceptance smoke |
 | Exclusive scheduling | Fresh completed result prevents duplicate local execution | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
-| Speculative scheduling | Offline workers publish forked candidate results and adjudication selects a winner | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
+| Speculative scheduling | Offline workers publish forked candidate results and adjudication selects a winner | unit/local-e2e/real-agent | `test/scheduler.test.ts`, cluster lab, real-agent acceptance |
 | Worker routing | Agent/model/tool capabilities choose eligible workers | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
 | Worker safety | Project/command/timeout policy gates runner execution | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
 | Worker presets | Codex/Claude/OpenCode presets fill worker and command defaults | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
-| Worktree isolation | Runner can execute from a task-specific worktree directory | unit | `test/scheduler.test.ts` |
+| Real agent execution | Codex, Claude, and OpenCode execute scheduler tasks and produce verified filesystem changes | real-agent | `npm run test:real-agents` |
+| Worktree isolation | Runner executes from an assignment-specific worktree directory, including same-machine speculative workers | unit/real-agent | `test/scheduler.test.ts`, real-agent acceptance |
 | tmux attach | Human can start/status/attach/stop worker loop sessions | local smoke | CLI tmux smoke |
 
 ## Current Executable Acceptance
@@ -93,9 +94,11 @@ Run:
 
 ```bash
 npm run test:acceptance
+npm run test:real-agents
 ```
 
-This starts two temporary `continuityd` processes and validates:
+`npm run test:acceptance` starts two temporary `continuityd` processes and
+validates:
 
 - daemon startup and health
 - source daemon checkpoint
@@ -111,6 +114,14 @@ This starts two temporary `continuityd` processes and validates:
 - distributed scheduler task execution through `scheduler-worker-loop`
 - background scheduler worker loop discovering and running a new task without
   manual prompting
+
+`npm run test:real-agents` requires authenticated local Codex, Claude, and
+OpenCode CLIs. It validates:
+
+- each agent completes an exclusive scheduler task through `scheduler-worker-loop`
+- each agent produces a verified proof file in its isolated worktree
+- a speculative task can collect real results from all three agents
+- `scheduler-adjudicate` records a winning result and collapses scheduler heads
 
 ## Cross-Machine Acceptance
 

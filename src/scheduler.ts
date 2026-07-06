@@ -273,7 +273,6 @@ export async function runSchedulerOnce(input: SchedulerRunOnceInput): Promise<Sc
     };
   }
 
-  const worktreeDir = input.worktreeRoot ? await prepareTaskWorktree(input.worktreeRoot, ref, selected) : undefined;
   const assignmentBlock = await submitTaskAssignment({
     ...ref,
     provider: input.provider,
@@ -287,6 +286,7 @@ export async function runSchedulerOnce(input: SchedulerRunOnceInput): Promise<Sc
       leaseUntil: new Date(timestampMs(createdAt) + (input.leaseMs ?? DEFAULT_ASSIGNMENT_LEASE_MS)).toISOString(),
     },
   });
+  const worktreeDir = input.worktreeRoot ? await prepareTaskWorktree(input.worktreeRoot, ref, selected, input.worker.workerId, assignmentBlock.blockId) : undefined;
 
   const startedAt = new Date().toISOString();
   const outcome = await runWorker(input.runner ?? "fake", {
@@ -647,8 +647,8 @@ function appendLimited(current: string, chunk: string): string {
   return next.length <= OUTPUT_LIMIT ? next : next.slice(next.length - OUTPUT_LIMIT);
 }
 
-async function prepareTaskWorktree(root: string, ref: LaneRef, intent: SchedulerIntent): Promise<string> {
-  const dir = path.resolve(root, safePathSegment(`${ref.projectId}-${ref.taskId}-${intent.blockId.slice(4, 12)}`));
+async function prepareTaskWorktree(root: string, ref: LaneRef, intent: SchedulerIntent, workerId: string, assignmentBlockId: string): Promise<string> {
+  const dir = path.resolve(root, safePathSegment(`${ref.projectId}-${ref.taskId}-${workerId}-${intent.blockId.slice(4, 12)}-${assignmentBlockId.slice(4, 12)}`));
   if (await pathExists(dir)) return dir;
   await mkdir(path.dirname(dir), { recursive: true });
 

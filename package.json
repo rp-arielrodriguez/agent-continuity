@@ -46,6 +46,7 @@
     "prepare": "npm run build",
     "test": "npm run build && node --test dist/test/*.test.js",
     "test:acceptance": "npm run build:all && node scripts/acceptance-smoke.mjs",
+    "test:real-agents": "npm run build:all && node scripts/real-agent-acceptance.mjs",
     "test:cluster": "node scripts/cluster-lab.mjs",
     "cluster:playground": "node scripts/cluster-playground.mjs",
     "test:e2e": "npm run build:all && node --test dist/test/e2e/*.test.js",

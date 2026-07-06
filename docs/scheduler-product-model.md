@@ -107,7 +107,7 @@ exclusive
   stale claims can be reclaimed through lease rules
 
 speculative
-  multiple workers may run in isolated lanes/worktrees
+  multiple workers may run in isolated lanes and assignment-specific worktrees
   each result is a candidate
   an evaluator or human chooses the winner
 ```
@@ -218,7 +218,7 @@ should not be required for core correctness.
 - Accept task intents only from trusted issuers.
 - Route only approved projects on each node.
 - Never execute arbitrary shell payloads from peers by default.
-- Prefer isolated worktrees for scheduled tasks.
+- Prefer isolated assignment-specific worktrees for scheduled tasks.
 - Keep secrets scoped by project and worker.
 - Enforce runtime and cost budgets before launching workers.
 - Checkpoint scheduler decisions as signed events.

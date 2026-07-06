@@ -526,7 +526,74 @@ test("command runner executes inside per-task worktree root when configured", as
     const artifacts = result.resultBlock?.payload.artifacts?.join("\n") ?? "";
     assert.match(artifacts, new RegExp(worktreeRoot.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
-    await execFile("git", ["worktree", "prune"]).catch(() => undefined);
     await rm(worktreeRoot, { recursive: true, force: true });
+    await execFile("git", ["worktree", "prune"]).catch(() => undefined);
+  }
+});
+
+test("speculative workers receive separate worktrees for the same task intent", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const worktreeRoot = await mkdtemp(path.join(os.tmpdir(), "continuity-worktrees-"));
+
+  try {
+    await submitTaskIntent({
+      ...ref,
+      provider,
+      signer,
+      createdAt: "2026-07-05T22:45:00.000Z",
+      payload: {
+        title: "Same-machine speculative worktree smoke",
+        instructions: "Multiple local workers should not share one checkout.",
+        policy: "speculative",
+        requirements: { tools: ["shell"] },
+      },
+    });
+
+    const command = `${process.execPath} -e ${JSON.stringify("console.log(process.env.CONTINUITY_WORKER_ID); console.log(process.env.CONTINUITY_WORKTREE_DIR);")}`;
+    const first = await runSchedulerOnce({
+      ...ref,
+      provider,
+      signer,
+      now: "2026-07-05T22:46:00.000Z",
+      worker: {
+        workerId: "local-codex-a",
+        agent: "codex",
+        tools: ["shell"],
+      },
+      runner: "command",
+      command,
+      worktreeRoot,
+    });
+    const second = await runSchedulerOnce({
+      ...ref,
+      provider,
+      signer,
+      now: "2026-07-05T22:47:00.000Z",
+      worker: {
+        workerId: "local-codex-b",
+        agent: "codex",
+        tools: ["shell"],
+      },
+      runner: "command",
+      command,
+      worktreeRoot,
+    });
+
+    assert.equal(first.status, "completed");
+    assert.equal(second.status, "completed");
+    const firstArtifacts = first.resultBlock?.payload.artifacts?.join("\n") ?? "";
+    const secondArtifacts = second.resultBlock?.payload.artifacts?.join("\n") ?? "";
+    const worktreePattern = new RegExp(`${worktreeRoot.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\n]+`, "g");
+    const firstWorktree = firstArtifacts.match(worktreePattern)?.at(-1);
+    const secondWorktree = secondArtifacts.match(worktreePattern)?.at(-1);
+    assert.ok(firstWorktree);
+    assert.ok(secondWorktree);
+    assert.notEqual(firstWorktree, secondWorktree);
+    assert.match(firstWorktree, /local-codex-a/);
+    assert.match(secondWorktree, /local-codex-b/);
+  } finally {
+    await rm(worktreeRoot, { recursive: true, force: true });
+    await execFile("git", ["worktree", "prune"]).catch(() => undefined);
   }
 });

@@ -514,9 +514,10 @@ Runner commands receive task context through environment variables:
 `CONTINUITY_TASK_INSTRUCTIONS`, `CONTINUITY_WORKER_ID`, `CONTINUITY_AGENT`,
 `CONTINUITY_MODEL_FAMILIES`, `CONTINUITY_MODELS`, and `CONTINUITY_TOOLS`.
 When `--worktree-root` is configured, the runner also receives
-`CONTINUITY_WORKTREE_DIR` and executes from that task-specific directory. The
-worker can be constrained with `--allowed-project-ids`, `--allowed-commands`,
-and `--max-runner-timeout-ms`.
+`CONTINUITY_WORKTREE_DIR` and executes from an assignment-specific directory, so
+same-machine speculative workers do not share a checkout. The worker can be
+constrained with `--allowed-project-ids`, `--allowed-commands`, and
+`--max-runner-timeout-ms`.
 
 ## Development
 
@@ -527,11 +528,18 @@ npm run build:daemon
 cd daemon && go test ./...
 npm run test:e2e
 npm run test:acceptance
+npm run test:real-agents
 npm run test:cluster
 ```
 
 Database-backed integration checks are skipped unless
 `CONTINUITY_TEST_DATABASE_URL` is set.
+
+`npm run test:real-agents` is a local product acceptance test. It requires
+authenticated Codex, Claude, and OpenCode CLIs on `PATH`, launches them through
+`scheduler-worker-loop`, verifies real file writes in isolated worktrees, and
+checks speculative competition plus adjudication. Override the OpenCode model
+with `CONTINUITY_REAL_AGENT_OPENCODE_MODEL` when the local default is not usable.
 
 `npm run test:cluster` is an ephemeral acceptance test: it creates containers,
 asserts behavior, and removes them. For a usable live lab, run the persistent
