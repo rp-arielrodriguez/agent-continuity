@@ -37,6 +37,14 @@ test("default canon marks daemon as source of truth for daemon checkpoints", () 
   assert.match(canon, /continuity resume --daemon --task-id demo-task/);
 });
 
+test("default canon marks agent daemon checkpoints and bounded artifacts", () => {
+  const canon = renderDefaultCanon({ ...input, source: "agent-run", files: `stdout:\n${"agent-output ".repeat(200)}` });
+  assert.match(canon, /Daemon continuity/);
+  assert.match(canon, /## ARTIFACTS/);
+  assert.match(canon, /stdout:/);
+  assert.match(canon, /\[truncated \d+ chars\]/);
+});
+
 test("normalizes canon last-reconciled header", () => {
   const canon = withLastReconciled("# Canon: demo\n\nlast-reconciled: old\n", "2026-06-14T01:00:00.000Z");
   assert.match(canon, /last-reconciled: 2026-06-14T01:00:00\.000Z/);

@@ -73,6 +73,55 @@ try {
     }
   });
 
+  await scenario("installed container CLI runs agent harness work and syncs it to orchestrator", async () => {
+    const taskId = `cluster-harness-${runId}`;
+    const result = await jsonContinuity("worker-a", [
+      "agent-run",
+      "--project-id",
+      projectId,
+      "--task-id",
+      taskId,
+      "--lane-id",
+      "main",
+      "--node-id",
+      "worker-a",
+      "--actor-id",
+      "worker-a-codex",
+      "--command",
+      "printf container-harness-ok",
+      "--allowed-commands",
+      "printf",
+      "--model-id",
+      "cluster-model",
+      "--session-id",
+      "cluster-harness-run",
+      "--json",
+    ]);
+    assertEqual(result.exitCode, 0, "container agent-run should complete");
+    assertIncludes(result.stdout, "container-harness-ok", "container agent-run should expose stdout");
+    assertEqual(result.checkpoint.appended, true, "container agent-run should checkpoint");
+
+    const sync = await peerSyncLane("orchestrator", taskId, "main");
+    assertAtLeast(sync.insertedBlocks, 3, "orchestrator should import harness bootstrap, claim, and checkpoint");
+    assertEqual(sync.rejectedBlocks, 0, "orchestrator should not reject container harness blocks");
+
+    const orient = await jsonContinuity("orchestrator", [
+      "orient",
+      "--project-id",
+      projectId,
+      "--task-id",
+      taskId,
+      "--lane-id",
+      "main",
+      "--node-id",
+      "orchestrator",
+      "--actor-id",
+      "orchestrator-reader",
+      "--json",
+    ]);
+    assertIncludes(orient.prompt, "container-harness-ok", "orchestrator orientation should include synced command proof");
+  });
+
   await scenario("exclusive task is completed once and later workers drop to idle after sync", async () => {
     const taskId = `cluster-exclusive-${runId}`;
     await submitTask("orchestrator", taskId, {
@@ -299,6 +348,10 @@ async function schedulerWorkerLoop(nodeName, taskId, input) {
 }
 
 async function peerSync(nodeName, taskId) {
+  return peerSyncLane(nodeName, taskId, "scheduler");
+}
+
+async function peerSyncLane(nodeName, taskId, laneId) {
   return jsonContinuity(nodeName, [
     "peer-sync",
     "--project-id",
@@ -306,7 +359,7 @@ async function peerSync(nodeName, taskId) {
     "--task-id",
     taskId,
     "--lane-id",
-    "scheduler",
+    laneId,
     "--json",
   ]);
 }
@@ -402,6 +455,10 @@ function assert(value, message) {
 
 function assertEqual(actual, expected, message) {
   if (actual !== expected) throw new Error(`${message}: expected ${expected}, got ${actual}`);
+}
+
+function assertAtLeast(actual, expected, message) {
+  if (typeof actual !== "number" || actual < expected) throw new Error(`${message}: expected >= ${expected}, got ${actual}`);
 }
 
 function assertIncludes(value, expected, message = "expected value to include substring") {

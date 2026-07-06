@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { claimAgentLane, handoffAgentLane, orientAgent, runAgentCommand } from "./agent-harness.js";
 import { defaultCheckpointInput, loadConfig, maskDatabaseUrl } from "./config.js";
 import { loadDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import { daemonStatus, startDaemon, stopDaemon } from "./daemon-lifecycle.js";
@@ -285,6 +286,151 @@ Summary: ${taskId} imported ${result.imported} new journal entries
 
       if (parsed.options.json) console.log(JSON.stringify(snapshot, null, 2));
       else console.log(renderDashboard(snapshot).trimEnd());
+      return;
+    }
+    case "orient": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      const result = await orientAgent({
+        ...ref,
+        provider,
+        actor: signer.signer,
+        now: stringOption(parsed, "now"),
+        syncBeforeOrient: parsed.options.sync === true ? () => provider.syncTrustedPeers(ref) : undefined,
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else console.log(result.prompt);
+      return;
+    }
+    case "claim": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      if (parsed.options.sync === true) await provider.syncTrustedPeers(ref);
+      const result = await claimAgentLane({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        now: stringOption(parsed, "now"),
+        createdAt: stringOption(parsed, "now"),
+        leaseUntil: stringOption(parsed, "lease-until"),
+        reason: stringOption(parsed, "reason"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`project: ${result.projectId}`);
+        console.log(`task: ${result.taskId}`);
+        console.log(`lane: ${result.laneId}`);
+        console.log(`action: ${result.action}`);
+        console.log(`owner: ${result.lane.owner ? `${result.lane.owner.nodeId}/${result.lane.owner.actorId}` : "<none>"}`);
+        console.log(`tip: ${result.lane.tip ?? "<empty>"}`);
+      }
+      return;
+    }
+    case "save": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      if (parsed.options.sync === true) await provider.syncTrustedPeers(ref);
+      const canonFile = stringOption(parsed, "canon-file");
+      const input = defaultCheckpointInput({
+        taskId: ref.taskId,
+        timestamp: stringOption(parsed, "timestamp") ?? stringOption(parsed, "now"),
+        modelId: stringOption(parsed, "model-id"),
+        sessionId: stringOption(parsed, "session-id"),
+        status: stringOption(parsed, "status") as never,
+        progress: requiredOption(parsed, "progress"),
+        files: stringOption(parsed, "files"),
+        blocking: stringOption(parsed, "blocking"),
+        next: stringOption(parsed, "next"),
+        canonMarkdown: canonFile ? await readFile(canonFile, "utf8") : stringOption(parsed, "canon"),
+        checkpointDir: stringOption(parsed, "checkpoint-dir"),
+        source: stringOption(parsed, "source") ?? "agent-save",
+      });
+      const result = await runDaemonCheckpoint({
+        ...input,
+        ...ref,
+        provider,
+        stateDir: daemonRuntimeFromOptions(parsed, config).stateDir,
+        keyFile: stringOption(parsed, "key-file"),
+        nodeId: stringOption(parsed, "node-id"),
+        actorId: stringOption(parsed, "actor-id"),
+        leaseUntil: stringOption(parsed, "lease-until"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`saved: ${result.appended ? "yes" : "already-exists"}`);
+        console.log(`project: ${result.projectId}`);
+        console.log(`task: ${result.taskId}`);
+        console.log(`lane: ${result.laneId}`);
+        console.log(`block: ${result.blockId ?? "<none>"}`);
+        console.log(`tip: ${result.finalTip ?? "<empty>"}`);
+      }
+      return;
+    }
+    case "handoff": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      if (parsed.options.sync === true) await provider.syncTrustedPeers(ref);
+      const result = await handoffAgentLane({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        now: stringOption(parsed, "now"),
+        createdAt: stringOption(parsed, "now"),
+        leaseUntil: stringOption(parsed, "lease-until"),
+        targetNodeId: stringOption(parsed, "target-node-id"),
+        targetActorId: stringOption(parsed, "target-actor-id"),
+        releaseReason: stringOption(parsed, "reason"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`mode: ${result.mode}`);
+        console.log(`accepted: ${result.accepted ? "yes" : "no"}`);
+        console.log(`action: ${result.action}`);
+        console.log(`block: ${result.block?.blockId ?? "<none>"}`);
+        console.log(`owner: ${result.lane.owner ? `${result.lane.owner.nodeId}/${result.lane.owner.actorId}` : "<none>"}`);
+        if (result.rejection) console.log(`rejection: ${result.rejection.code}: ${result.rejection.message}`);
+      }
+      return;
+    }
+    case "agent-run": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      const result = await runAgentCommand({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        command: requiredOption(parsed, "command"),
+        allowedCommands: listOption(parsed, "allowed-commands"),
+        cwd: stringOption(parsed, "cwd"),
+        now: stringOption(parsed, "now"),
+        createdAt: stringOption(parsed, "now"),
+        leaseUntil: stringOption(parsed, "lease-until"),
+        claimReason: stringOption(parsed, "reason"),
+        timeoutMs: numberOption(parsed, "timeout-ms"),
+        syncBeforeOrient: parsed.options.sync === true ? () => provider.syncTrustedPeers(ref) : undefined,
+        checkpoint: {
+          enabled: parsed.options["no-checkpoint"] !== true,
+          stateDir: daemonRuntimeFromOptions(parsed, config).stateDir,
+          keyFile: stringOption(parsed, "key-file"),
+          timestamp: stringOption(parsed, "timestamp") ?? stringOption(parsed, "now"),
+          modelId: stringOption(parsed, "model-id"),
+          sessionId: stringOption(parsed, "session-id"),
+          source: stringOption(parsed, "source") ?? "agent-run",
+          next: stringOption(parsed, "next"),
+        },
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`exitCode: ${result.exitCode}`);
+        if (result.stdout.trim()) console.log(`stdout:\n${result.stdout.trimEnd()}`);
+        if (result.stderr.trim()) console.log(`stderr:\n${result.stderr.trimEnd()}`);
+        if (result.checkpoint) console.log(`checkpoint: ${result.checkpoint.blockId ?? "<none>"}`);
+      }
+      process.exitCode = result.exitCode === 0 ? 0 : result.exitCode;
       return;
     }
     case "scheduler-dashboard": {
@@ -1329,6 +1475,14 @@ async function schedulerLaneRef(parsed: ParsedArgs): Promise<{ projectId: string
   };
 }
 
+async function agentLaneRef(parsed: ParsedArgs): Promise<{ projectId: string; taskId: string; laneId: string }> {
+  return {
+    projectId: await projectIdOption(parsed),
+    taskId: requiredOption(parsed, "task-id"),
+    laneId: stringOption(parsed, "lane-id") ?? "main",
+  };
+}
+
 async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, actorId: string): Promise<Awaited<ReturnType<typeof loadOrCreateNodeSigner>>> {
   const daemon = daemonRuntimeFromOptions(parsed, config);
   return loadOrCreateNodeSigner({
@@ -1755,6 +1909,11 @@ Commands:
   checkpoint  Append a journal entry and rewrite canon through Absurd
   doctor      Verify CLI, runtime, database schemas, queue, and integrations
   dashboard   Render a tmux-friendly continuityd lane dashboard
+  orient      Sync optionally and print an agent-native daemon orientation packet
+  claim       Claim or initialize an interactive agent lane
+  save        Agent-native shorthand for daemon checkpoint
+  handoff     Release a lane or hand it to another actor
+  agent-run   Orient, run a local command with continuity env, and checkpoint result
   scheduler-dashboard Render scheduler queue, workers, assignments, and results
   scheduler-task-submit Submit a task intent into a scheduler lane
   scheduler-worker-register Register a worker profile in a scheduler lane
@@ -1819,6 +1978,11 @@ Examples:
   continuity resume --daemon --sync --task-id TASK
   continuity status --json
   continuity dashboard --project-id PROJECT --task-id TASK --lane-id main
+  continuity orient --project-id PROJECT --task-id TASK --sync
+  continuity claim --project-id PROJECT --task-id TASK --reason "starting work"
+  continuity save --project-id PROJECT --task-id TASK --status in_progress --progress "Implemented X" --next "Test Y"
+  continuity handoff --project-id PROJECT --task-id TASK --target-actor-id claude-session-2
+  continuity agent-run --project-id PROJECT --task-id TASK --command 'printf ok' --allowed-commands printf
   continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
   continuity scheduler-worker-register --project-id PROJECT --task-id TASK --preset codex --node-id a0263
   continuity scheduler-run-once --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git

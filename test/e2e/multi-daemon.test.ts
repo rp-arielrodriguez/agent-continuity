@@ -37,6 +37,233 @@ test("cross-machine resume syncs from a trusted peer address book", async (t) =>
     processes.push(await startDaemon(daemonBinary, local));
     processes.push(await startDaemon(daemonBinary, fresh));
 
+    const harnessTaskId = "agent-harness-e2e";
+    const claim = await execFile(process.execPath, [
+      cli,
+      "claim",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "codex-e2e",
+      "--lease-until",
+      "2026-07-06T10:10:00.000Z",
+      "--now",
+      "2026-07-06T10:00:00.000Z",
+      "--json",
+    ], { env });
+    const claimResult = JSON.parse(claim.stdout) as { action: string; lane: { owner?: { actorId: string } } };
+    assert.equal(claimResult.action, "continue");
+    assert.equal(claimResult.lane.owner?.actorId, "codex-e2e");
+
+    const orient = await execFile(process.execPath, [
+      cli,
+      "orient",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "codex-e2e",
+      "--now",
+      "2026-07-06T10:01:00.000Z",
+      "--json",
+    ], { env });
+    const orientResult = JSON.parse(orient.stdout) as { prompt: string; action: string };
+    assert.equal(orientResult.action, "continue");
+    assert.match(orientResult.prompt, /<continuity-orient>/);
+    assert.match(orientResult.prompt, /owner: local-node\/codex-e2e/);
+
+    const save = await execFile(process.execPath, [
+      cli,
+      "save",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "codex-e2e",
+      "--timestamp",
+      "2026-07-06T10:02:00.000Z",
+      "--model-id",
+      "e2e-model",
+      "--session-id",
+      "e2e-save",
+      "--status",
+      "in_progress",
+      "--progress",
+      "Agent harness e2e save checkpoint.",
+      "--next",
+      "Run agent command.",
+      "--json",
+    ], { env });
+    const saveResult = JSON.parse(save.stdout) as { appended: boolean; blockId?: string };
+    assert.equal(saveResult.appended, true);
+    assert.match(saveResult.blockId ?? "", /^blk_/);
+
+    const agentRun = await execFile(process.execPath, [
+      cli,
+      "agent-run",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "codex-e2e",
+      "--command",
+      `${process.execPath} -e ${JSON.stringify("console.log(process.env.CONTINUITY_TASK_ID); console.log(process.env.CONTINUITY_ACTOR_ID);")}`,
+      "--allowed-commands",
+      process.execPath,
+      "--timestamp",
+      "2026-07-06T10:03:00.000Z",
+      "--model-id",
+      "e2e-model",
+      "--session-id",
+      "e2e-agent-run",
+      "--json",
+    ], { env });
+    const agentRunResult = JSON.parse(agentRun.stdout) as { exitCode: number; stdout: string; checkpoint?: { appended: boolean } };
+    assert.equal(agentRunResult.exitCode, 0);
+    assert.match(agentRunResult.stdout, /agent-harness-e2e/);
+    assert.match(agentRunResult.stdout, /codex-e2e/);
+    assert.equal(agentRunResult.checkpoint?.appended, true);
+
+    const handoff = await execFile(process.execPath, [
+      cli,
+      "handoff",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "codex-e2e",
+      "--target-node-id",
+      "local-node",
+      "--target-actor-id",
+      "claude-e2e",
+      "--lease-until",
+      "2026-07-06T10:20:00.000Z",
+      "--now",
+      "2026-07-06T10:04:00.000Z",
+      "--json",
+    ], { env });
+    const handoffResult = JSON.parse(handoff.stdout) as { accepted: boolean; lane: { owner?: { actorId: string } } };
+    assert.equal(handoffResult.accepted, true);
+    assert.equal(handoffResult.lane.owner?.actorId, "claude-e2e");
+
+    const release = await execFile(process.execPath, [
+      cli,
+      "handoff",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      harnessTaskId,
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "claude-e2e",
+      "--reason",
+      "e2e handoff accepted",
+      "--now",
+      "2026-07-06T10:05:00.000Z",
+      "--json",
+    ], { env });
+    const releaseResult = JSON.parse(release.stdout) as { accepted: boolean; lane: { owner?: unknown } };
+    assert.equal(releaseResult.accepted, true);
+    assert.equal(releaseResult.lane.owner, undefined);
+
+    const blobTaskId = "blob-cli-e2e";
+    const largeCanon = "# Canon: blob-cli-e2e\n\n" + "large canonical state\n".repeat(200);
+    await execFile(process.execPath, [
+      cli,
+      "checkpoint",
+      "--daemon",
+      "--socket",
+      local.socket,
+      "--state-dir",
+      local.stateDir,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      blobTaskId,
+      "--status",
+      "in_progress",
+      "--progress",
+      "Large canon stored through blob-backed daemon checkpoint.",
+      "--canon",
+      largeCanon,
+      "--timestamp",
+      "2026-07-06T10:06:00.000Z",
+      "--model-id",
+      "e2e-model",
+      "--session-id",
+      "e2e-blob",
+      "--node-id",
+      "local-node",
+      "--actor-id",
+      "blob-e2e",
+    ], { env });
+    const blobInventory = await execFile(process.execPath, [
+      cli,
+      "lane-inventory",
+      "--socket",
+      local.socket,
+      "--project-id",
+      "rp-arielrodriguez/agent-continuity-e2e",
+      "--task-id",
+      blobTaskId,
+      "--lane-id",
+      "main",
+      "--json",
+    ], { env });
+    const blobInventoryResult = JSON.parse(blobInventory.stdout) as { blocks: Array<{ blobDigests?: string[] }> };
+    const digest = blobInventoryResult.blocks.flatMap((block) => block.blobDigests ?? [])[0];
+    assert.match(digest ?? "", /^sha256:/);
+    const blob = await execFile(process.execPath, [
+      cli,
+      "blob-get",
+      "--socket",
+      local.socket,
+      "--digest",
+      digest,
+    ], { env });
+    assert.match(blob.stdout, /large canonical state/);
+
     await execFile(process.execPath, [
       cli,
       "checkpoint",

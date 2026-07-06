@@ -19,7 +19,7 @@ import {
   submitTaskIntent,
   workerMatchesIntent,
 } from "../src/scheduler.js";
-import { runSchedulerWorkerLoop } from "../src/scheduler-worker.js";
+import { runSchedulerWorkerLoop, startTmuxSession, stopTmuxSession, tmuxSessionStatus } from "../src/scheduler-worker.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -416,6 +416,33 @@ test("scheduler worker loop runs queued tasks until max-runs", async () => {
 
   const state = await loadSchedulerState(provider, ref);
   assert.equal(state.counts.completed, 2);
+});
+
+test("tmux worker session lifecycle starts, exposes tail output, and stops", async (t) => {
+  try {
+    await execFile("tmux", ["-V"]);
+  } catch {
+    t.skip("tmux is not installed");
+    return;
+  }
+
+  const session = `continuity-test-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    const started = await startTmuxSession({
+      session,
+      command: "printf tmux-smoke-ok; sleep 5",
+      cwd: process.cwd(),
+    });
+    assert.equal(started.running, true);
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const status = await tmuxSessionStatus({ session, tailLines: 10 });
+    assert.equal(status.running, true);
+    assert.match(status.tail ?? "", /tmux-smoke-ok/);
+  } finally {
+    const stopped = await stopTmuxSession({ session });
+    assert.equal(stopped.running, false);
+  }
 });
 
 test("scheduler worker loop stops after idle limit", async () => {

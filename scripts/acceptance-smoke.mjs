@@ -14,6 +14,7 @@ const cli = path.join(root, "dist/src/cli.js");
 const daemonBinary = path.join(root, "dist/bin/continuityd");
 const projectId = "rp-arielrodriguez/agent-continuity-acceptance";
 const taskId = "acceptance-smoke";
+const agentHarnessTaskId = "agent-harness-acceptance-smoke";
 const schedulerTaskId = "scheduler-acceptance-smoke";
 
 await assertBuilt();
@@ -375,6 +376,175 @@ try {
     assertEqual(repeatResult.fetchedBlocks, 0, "expected repeat sync to fetch no blocks");
     assertEqual(repeatResult.insertedBlocks, 0, "expected repeat sync to be idempotent");
     assertEqual(repeatResult.rejectedBlocks, 0, "expected no rejected blocks on repeat sync");
+  });
+
+  await scenario("agent-native harness commands run, checkpoint, handoff, and sync", async () => {
+    const claim = await run([
+      "claim",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--lease-until",
+      "2026-07-05T21:40:00.000Z",
+      "--now",
+      "2026-07-05T21:30:00.000Z",
+      "--json",
+    ], { env });
+    const claimResult = JSON.parse(claim.stdout);
+    assertEqual(claimResult.lane.owner.actorId, "source-codex", "expected source-codex to own harness lane");
+
+    const save = await run([
+      "save",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--timestamp",
+      "2026-07-05T21:31:00.000Z",
+      "--model-id",
+      "acceptance-model",
+      "--session-id",
+      "agent-harness-save",
+      "--status",
+      "in_progress",
+      "--progress",
+      "Agent-native save accepted by source daemon.",
+      "--next",
+      "Run agent-native command.",
+      "--json",
+    ], { env });
+    assertEqual(JSON.parse(save.stdout).appended, true, "expected agent-native save to append");
+
+    const agentRun = await run([
+      "agent-run",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--command",
+      "printf agent-harness-acceptance-ok",
+      "--allowed-commands",
+      "printf",
+      "--timestamp",
+      "2026-07-05T21:32:00.000Z",
+      "--model-id",
+      "acceptance-model",
+      "--session-id",
+      "agent-harness-run",
+      "--json",
+    ], { env });
+    const agentRunResult = JSON.parse(agentRun.stdout);
+    assertEqual(agentRunResult.exitCode, 0, "expected agent-run command to pass");
+    assertIncludes(agentRunResult.stdout, "agent-harness-acceptance-ok");
+    assertEqual(agentRunResult.checkpoint.appended, true, "expected agent-run to checkpoint output");
+
+    const handoff = await run([
+      "handoff",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--target-node-id",
+      "source-node",
+      "--target-actor-id",
+      "source-claude",
+      "--lease-until",
+      "2026-07-05T21:45:00.000Z",
+      "--now",
+      "2026-07-05T21:33:00.000Z",
+      "--json",
+    ], { env });
+    assertEqual(JSON.parse(handoff.stdout).lane.owner.actorId, "source-claude", "expected handoff to transfer owner");
+
+    const release = await run([
+      "handoff",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-claude",
+      "--reason",
+      "acceptance handoff complete",
+      "--now",
+      "2026-07-05T21:34:00.000Z",
+      "--json",
+    ], { env });
+    assertEqual(JSON.parse(release.stdout).lane.owner, undefined, "expected release to clear owner");
+
+    const targetSync = await run([
+      "peer-sync",
+      "--socket",
+      target.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--lane-id",
+      "main",
+      "--json",
+    ], { env });
+    const targetSyncResult = JSON.parse(targetSync.stdout);
+    assertAtLeast(targetSyncResult.insertedBlocks, 5, "expected target to import harness lane blocks");
+    assertEqual(targetSyncResult.rejectedBlocks, 0, "expected no target harness sync rejections");
+
+    const orient = await run([
+      "orient",
+      "--socket",
+      target.socket,
+      "--state-dir",
+      target.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "target-node",
+      "--actor-id",
+      "target-codex",
+      "--json",
+    ], { env });
+    const orientResult = JSON.parse(orient.stdout);
+    assertIncludes(orientResult.prompt, "agent-harness-acceptance-ok");
   });
 
   await scenario("distributed scheduler task is executed on target and synced back to source", async () => {

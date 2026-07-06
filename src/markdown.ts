@@ -24,13 +24,21 @@ export function renderJournal(entries: JournalEntry[]): string {
 }
 
 export function renderDefaultCanon(input: CheckpointInput): string {
-  const daemonSource = input.source?.startsWith("daemon");
+  const daemonSource = isDaemonSource(input.source);
   const sourceLine = daemonSource
     ? `- Daemon continuity via \`continuity resume --daemon --task-id ${input.taskId}\`.`
     : `- PostgreSQL continuity tables via \`continuity resume --task-id ${input.taskId}\`.`;
   const staleFix = daemonSource
     ? `Run \`continuity checkpoint --daemon --task-id ${input.taskId}\` with reconciled canon before acting.`
     : `Run \`continuity reconcile --task-id ${input.taskId}\` before acting.`;
+  const artifactsSection = input.files
+    ? `
+## ARTIFACTS
+\`\`\`text
+${truncateForCanon(input.files)}
+\`\`\`
+`
+    : "";
   return `# Canon: ${input.taskId}
 
 last-reconciled: ${input.timestamp}
@@ -45,6 +53,7 @@ ${sourceLine}
 
 ## DECISIONS
 - Current checkpoint status: ${input.status}.
+${artifactsSection}
 
 ## REJECTED (do not re-derive)
 - Directly editing markdown checkpoint files as the authority; markdown is an exported projection.
@@ -52,6 +61,15 @@ ${sourceLine}
 ## NEXT-ACTION
 - ${input.next ?? "None"}
 `;
+}
+
+function isDaemonSource(source: string | undefined): boolean {
+  return Boolean(source?.startsWith("daemon") || source?.startsWith("agent-") || source === "scheduler-worker");
+}
+
+function truncateForCanon(value: string, limit = 1200): string {
+  if (value.length <= limit) return value;
+  return `${value.slice(0, limit)}\n[truncated ${value.length - limit} chars]`;
 }
 
 export function withLastReconciled(canonMarkdown: string, timestamp: string): string {

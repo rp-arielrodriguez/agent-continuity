@@ -33,60 +33,59 @@ The scheduler should route by the intersection of task requirements and worker
 capabilities. It should not assume that every agent can run every model or that
 every model harness has the same tools.
 
-## Acceptance Levels
+## Evidence Axes
 
 ```text
 unit
-  Pure validation and parsing behavior.
+  Pure TypeScript/Go behavior without long-running daemons.
 
-local-e2e
-  Real temporary daemons and real CLI commands on one machine.
+local-daemon
+  Real temporary continuityd processes plus the built CLI on one host.
+
+acceptance
+  Product smoke that starts daemons and drives public CLI flows.
+
+container
+  Clean Docker nodes that install from source and communicate through rendezvous.
 
 cross-machine
   Two physical machines using discovery/sync without fixed peer IPs.
-
-future
-  Product behavior documented here but not implemented yet.
 ```
 
-## Matrix
+## Rubik Matrix
 
-| Area | Behavior | Level | Proof |
-|---|---|---:|---|
-| Install/update | CLI builds and daemon binary starts | local-e2e | `npm run build:all`, `daemon-start`, `daemon-status` |
-| Manual continuity | Agent can checkpoint and resume through daemon | local-e2e | `checkpoint --daemon`, `resume --daemon` |
-| Peer listener | Remote read-only listener serves blocks and rejects writes | unit/local-e2e | `daemon/internal/continuityd/peer_test.go`, acceptance smoke |
-| Signed invite | Invite creates a trust payload and rejects tampering | unit | `test/peer-onboarding.test.ts` |
-| Bulk trust guard | `--add` requires trusted names or node IDs | unit/local-e2e | `test/peer-onboarding.test.ts`, acceptance smoke |
-| File rendezvous | Signed presence publishes and discovers from a directory | unit/local-e2e | `test/rendezvous-backend.test.ts`, acceptance smoke |
-| Git rendezvous | Signed presence commits/pushes and discovers from branch | unit/local-e2e/cross-machine | `test/rendezvous-backend.test.ts`, acceptance smoke, remote validation |
-| S3/R2 rendezvous | S3-compatible CLI contract uses `aws s3 cp/sync` | unit/local-e2e | `test/rendezvous-backend.test.ts`, acceptance smoke |
-| HTTPS rendezvous | HTTPS PUT/index discovery works | unit/local-e2e | `test/rendezvous-backend.test.ts`, acceptance smoke |
-| mDNS lifecycle | Daemon can start/status/stop mDNS advertisement | unit/local-e2e | `daemon/internal/continuityd/mdns_test.go`, acceptance smoke |
-| mDNS discovery | Peer is discovered without fixed IP | cross-machine | A0263/Mac Studio validation output |
-| Duplicate discovery | Same name with multiple node IDs/endpoints is deterministic | future | Needs acceptance case |
-| Trust persistence | Trusted peers survive daemon DB state | unit | `daemon/internal/continuityd/peer_test.go` |
-| Trust pinning | Node ID/public key mismatch does not silently update trust | future | Needs key-pinning policy |
-| Trust revocation | Disabled/revoked peers are not used for sync | unit/future | Address book supports enabled state; revocation UX pending |
-| Sync import | Trusted sync imports remote blocks with zero rejections | local-e2e/cross-machine | `test/e2e/multi-daemon.test.ts`, acceptance smoke, remote validation |
-| Sync idempotency | Repeated sync inserts zero duplicate blocks | unit/local-e2e | `daemon/internal/continuityd/peer_test.go`, acceptance smoke |
-| Sync partial success | One good peer plus one offline/divergent peer gives deterministic warnings | future | Needs acceptance case |
-| Resume after sync | Resume prints synced canon from remote task history | local-e2e/cross-machine | `test/e2e/multi-daemon.test.ts`, acceptance smoke, remote validation |
-| Invalid signatures | Tampered blocks and presence files are rejected | unit | `test/block.test.ts`, `test/peer-onboarding.test.ts` |
-| Expiry | Expired signed presence is rejected | unit | `validatePeerPresence` coverage should be expanded |
-| Divergence | Divergent lane blocks report per-block rejection | unit | `daemon/internal/continuityd/peer_test.go` |
-| Lane isolation | Syncing one lane does not alter adjacent tasks or lanes | future | Needs acceptance case |
-| Daemon restart | DB state survives daemon restart | unit/local-e2e | SQLite store tests; acceptance restart scenario should be added |
-| Scheduler queue | Task intents enter a daemon-backed scheduler lane | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
-| Background workers | Worker loop syncs trusted peers and runs newly submitted tasks without prompt paste | local-e2e | acceptance smoke |
-| Exclusive scheduling | Fresh completed result prevents duplicate local execution | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
-| Speculative scheduling | Offline workers publish forked candidate results and adjudication selects a winner | unit/local-e2e/real-agent | `test/scheduler.test.ts`, cluster lab, real-agent acceptance |
-| Worker routing | Agent/model/tool capabilities choose eligible workers | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
-| Worker safety | Project/command/timeout policy gates runner execution | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
-| Worker presets | Codex/Claude/OpenCode presets fill worker and command defaults | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
-| Real agent execution | Codex, Claude, and OpenCode execute scheduler tasks and produce verified filesystem changes | real-agent | `npm run test:real-agents` |
-| Worktree isolation | Runner executes from an assignment-specific worktree directory, including same-machine speculative workers | unit/real-agent | `test/scheduler.test.ts`, real-agent acceptance |
-| tmux attach | Human can start/status/attach/stop worker loop sessions | local smoke | CLI tmux smoke |
+Every supported product use case has an ID and at least one executable evidence
+path. `N/A` means that axis is not meaningful for that behavior, not that the
+behavior is untested.
+
+| ID | Plane | Use case | Unit | Local daemon | Acceptance | Container | Cross-machine |
+|---|---|---|---|---|---|---|---|
+| AC-INSTALL-001 | install | CLI builds, daemon installs, and daemon health is observable | `test/bootstrap-install.test.ts`, `test/daemon-install.test.ts` | `npm run test:e2e` | `npm run test:acceptance` | `npm run test:cluster` | target machine local test suite |
+| AC-MANUAL-001 | manual continuity | Agent checkpoint/resume works through daemon source of truth | `test/daemon-workflow.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` via harness checkpoint | physical sync/resume transcript |
+| AC-HARNESS-ORIENT-001 | agent harness | `orient` renders canon, owner, head, and sync context for an agent prompt | `test/agent-harness.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical `resume --daemon --sync` plus `orient` |
+| AC-HARNESS-CLAIM-001 | agent harness | `claim` bootstraps empty lanes and pauses on fresh foreign ownership | `test/agent-harness.test.ts`, `test/provider.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical lease conflict smoke |
+| AC-HARNESS-SAVE-001 | agent harness | `save` is a compact daemon checkpoint UX for interactive agents | `test/daemon-workflow.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` via `agent-run` checkpoint | physical checkpoint/resume transcript |
+| AC-HARNESS-HANDOFF-001 | agent harness | `handoff` transfers ownership or releases the lane | `test/agent-harness.test.ts`, `test/provider.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | N/A | physical handoff smoke |
+| AC-HARNESS-RUN-001 | agent harness | `agent-run` injects continuity env, runs allowed command, and checkpoints stdout/stderr | `test/agent-harness.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical installed CLI smoke |
+| AC-HARNESS-RUN-002 | agent harness | `agent-run` refuses unsafe commands and pauses before execution when another owner is fresh | `test/agent-harness.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` command allowlist | N/A | physical lease conflict smoke |
+| AC-DISCOVERY-001 | discovery | Signed file rendezvous publish/discover works without fixed peer IPs | `test/rendezvous-backend.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical file/git rendezvous transcript |
+| AC-DISCOVERY-002 | discovery | Git rendezvous publish/discover works with trusted filters | `test/rendezvous-backend.test.ts` | N/A | `npm run test:acceptance` | N/A | physical git rendezvous transcript |
+| AC-DISCOVERY-003 | discovery | S3/R2 and HTTPS rendezvous contracts are executable | `test/rendezvous-backend.test.ts`, `test/peer-onboarding.test.ts` | N/A | `npm run test:acceptance` with local HTTP/fake S3 | N/A | environment-backed smoke when credentials exist |
+| AC-DISCOVERY-004 | discovery | Daemon-managed mDNS can start/status/stop and physical peers can be found without fixed IPs | `daemon/internal/continuityd/mdns_test.go` | N/A | `npm run test:acceptance` lifecycle | N/A | A0263/Mac Studio mDNS transcript |
+| AC-TRUST-001 | trust | Bulk trust requires explicit name/node filters; invites and presence reject tampering | `test/peer-onboarding.test.ts`, `test/block.test.ts` | N/A | `npm run test:acceptance` trusted-filter guard | `npm run test:cluster` trust-names | physical trusted-name discovery transcript |
+| AC-SYNC-001 | sync | Delta sync advertises inventory and fetches only missing blocks | `daemon/internal/continuityd/peer_test.go` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical peer-sync transcript |
+| AC-SYNC-002 | sync | Repeated sync is idempotent and inserts zero duplicate blocks | `daemon/internal/continuityd/peer_test.go` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical repeat-sync transcript |
+| AC-STORAGE-001 | storage | Lane inventory is scoped by project/task/lane and shows heads/archive/blob refs | `test/daemon-provider.test.ts`, Go store tests | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | N/A | physical lane-inventory smoke |
+| AC-STORAGE-002 | storage | Snapshot/retention compacts old active blocks and fresh peers sync the compacted lane | `test/provider.test.ts`, `daemon/internal/continuityd/peer_test.go` | `test/e2e/multi-daemon.test.ts` | cross-covered by e2e | N/A | physical snapshot/retention transcript |
+| AC-STORAGE-003 | storage | Large canons/artifacts externalize to content-addressed blobs and can be read back | `daemon/internal/continuityd/store_test.go`, `test/daemon-provider.test.ts` | `blob-get` CLI smoke after large checkpoint | N/A | N/A | physical blob smoke when large artifact exists |
+| AC-SCHED-001 | scheduler | Task intents enter daemon-backed scheduler lanes and dashboards render state | `test/scheduler.test.ts`, `test/dashboard.test.ts` | `test/e2e/multi-daemon.test.ts` | `npm run test:acceptance` | `npm run test:cluster` | physical scheduler sync transcript |
+| AC-SCHED-002 | scheduler | Background workers sync trusted peers and run tasks without prompt paste | `test/scheduler.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical worker-loop smoke |
+| AC-SCHED-003 | scheduler | Exclusive scheduling prevents duplicate execution after a fresh result | `test/scheduler.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical worker-loop smoke |
+| AC-SCHED-004 | scheduler | Speculative scheduling keeps competing forked results and adjudication collapses heads | `test/scheduler.test.ts` | N/A | N/A | `npm run test:cluster` | physical speculative/adjudication smoke |
+| AC-SCHED-005 | scheduler | Agent/model/tool capabilities route work to eligible Codex/Claude/OpenCode profiles | `test/scheduler.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical mixed-agent smoke |
+| AC-SCHED-006 | scheduler | Project allowlist, command allowlist, and runner timeout gate execution | `test/scheduler.test.ts`, `test/agent-harness.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical runner safety smoke |
+| AC-TMUX-001 | operator UI | Worker loops can be started, tailed, attached, and stopped through tmux commands | `test/scheduler.test.ts` for loop core | CLI tmux smoke when `tmux` exists | install `--start-worker` smoke | container tmux smoke if image has tmux | physical tmux attach smoke |
+| AC-REAL-AGENTS-001 | real agents | Codex, Claude, and OpenCode execute scheduler tasks and leave verified filesystem proof | N/A | `npm run test:real-agents` | `npm run test:real-agents` | N/A | physical agent CLI auth required |
 
 ## Current Executable Acceptance
 
@@ -111,6 +110,8 @@ validates:
 - trusted peer sync
 - daemon resume after sync
 - repeated sync idempotency
+- agent-native `claim`, `save`, `agent-run`, `handoff`, release, peer sync, and
+  synced `orient`
 - distributed scheduler task execution through `scheduler-worker-loop`
 - background scheduler worker loop discovering and running a new task without
   manual prompting
@@ -138,6 +139,7 @@ target node
   continuity peer-sync --project-id <project> --task-id <task>
   continuity peer-sync --project-id <project> --task-id <task> --json
   continuity resume --daemon --sync --project-id <project> --task-id <task>
+  continuity orient --project-id <project> --task-id <task> --sync
 ```
 
 The accepted proof is:
@@ -150,16 +152,17 @@ The accepted proof is:
 - `lane-snapshot` followed by `lane-retain` leaves a compacted active snapshot
 - a fresh daemon can sync and resume from that compacted snapshot without the old
   archived parent blocks
+- `agent-run` on one machine produces a checkpoint that the other machine can sync
+  and inspect through `orient`
 - local test matrix passes on the target machine
 
-## Gaps To Close Next
+## Deliberate Non-Matrix Work
 
-- Add unit coverage for expired presence rejection.
-- Add a local-e2e restart persistence scenario.
-- Add duplicate discovery, key-pinning, disabled-peer, and lane isolation
-  acceptance cases.
-- Add physical cross-machine worker-loop acceptance with both nodes already
-  running workers.
-- Add persisted worker profiles/config files for multiple named workers.
-- Add real S3/R2 and private HTTPS environment-backed smoke tests when
-  credentials/endpoints are available.
+These are product extensions, not currently claimed as supported acceptance:
+
+- key-pinning policy for changed peer public keys
+- disabled-peer revocation UX beyond the stored enabled flag
+- persisted named worker profile files
+- real S3/R2/private HTTPS smoke tests outside local shims
+- richer remote orchestration that starts real Codex/Claude/OpenCode sessions on a
+  second physical machine without SSH/operator intervention
