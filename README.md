@@ -469,13 +469,12 @@ Run a foreground worker loop:
 continuity scheduler-worker-loop \
   --project-id rp-arielrodriguez/agent-continuity \
   --task-id agent-continuity-decentralized-runtime \
-  --worker-id a0263-codex \
-  --agent codex \
-  --model-families gpt \
-  --tools shell,git \
+  --preset codex \
+  --node-id a0263 \
   --sync \
-  --runner tmux \
-  --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+  --allowed-project-ids rp-arielrodriguez/agent-continuity \
+  --allowed-commands codex \
+  --worktree-root ~/.local/state/agent-continuity/worktrees
 ```
 
 Run the same loop as an attachable tmux-managed worker:
@@ -484,17 +483,29 @@ Run the same loop as an attachable tmux-managed worker:
 continuity scheduler-worker-start \
   --project-id rp-arielrodriguez/agent-continuity \
   --task-id agent-continuity-decentralized-runtime \
-  --worker-id a0263-codex \
-  --agent codex \
-  --model-families gpt \
-  --tools shell,git \
+  --preset codex \
+  --node-id a0263 \
   --sync \
-  --runner tmux \
-  --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+  --allowed-project-ids rp-arielrodriguez/agent-continuity \
+  --allowed-commands codex \
+  --worktree-root ~/.local/state/agent-continuity/worktrees
 
 continuity scheduler-worker-status --worker-id a0263-codex
 continuity scheduler-worker-attach --worker-id a0263-codex
 continuity scheduler-worker-stop --worker-id a0263-codex
+```
+
+Or install the local runtime and start a default worker in one command:
+
+```bash
+continuity install \
+  --start-worker \
+  --worker-project-id rp-arielrodriguez/agent-continuity \
+  --worker-task-id agent-continuity-decentralized-runtime \
+  --worker-preset codex \
+  --worker-allowed-project-ids rp-arielrodriguez/agent-continuity \
+  --worker-allowed-commands codex \
+  --worker-worktree-root ~/.local/state/agent-continuity/worktrees
 ```
 
 Runner commands receive task context through environment variables:
@@ -502,6 +513,10 @@ Runner commands receive task context through environment variables:
 `CONTINUITY_INTENT_BLOCK_ID`, `CONTINUITY_TASK_TITLE`,
 `CONTINUITY_TASK_INSTRUCTIONS`, `CONTINUITY_WORKER_ID`, `CONTINUITY_AGENT`,
 `CONTINUITY_MODEL_FAMILIES`, `CONTINUITY_MODELS`, and `CONTINUITY_TOOLS`.
+When `--worktree-root` is configured, the runner also receives
+`CONTINUITY_WORKTREE_DIR` and executes from that task-specific directory. The
+worker can be constrained with `--allowed-project-ids`, `--allowed-commands`,
+and `--max-runner-timeout-ms`.
 
 ## Development
 

@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { access, mkdir } from "node:fs/promises";
+import path from "node:path";
 import type {
   BootstrapPayload,
   ContinuitySigner,
@@ -101,6 +103,7 @@ export interface SchedulerRunOnceInput extends LaneRef {
   runnerTimeoutMs?: number;
   now?: string;
   leaseMs?: number;
+  worktreeRoot?: string;
 }
 
 export interface SchedulerRunOnceResult extends LaneRef {
@@ -270,6 +273,7 @@ export async function runSchedulerOnce(input: SchedulerRunOnceInput): Promise<Sc
     };
   }
 
+  const worktreeDir = input.worktreeRoot ? await prepareTaskWorktree(input.worktreeRoot, ref, selected) : undefined;
   const assignmentBlock = await submitTaskAssignment({
     ...ref,
     provider: input.provider,
@@ -293,6 +297,7 @@ export async function runSchedulerOnce(input: SchedulerRunOnceInput): Promise<Sc
     intent: selected,
     ref,
     worker: input.worker,
+    workDir: worktreeDir,
   }).catch((error: unknown): RunnerOutcome => ({
     status: "failed",
     summary: `runner failed before producing output: ${error instanceof Error ? error.message : String(error)}`,
@@ -391,7 +396,7 @@ export function renderSchedulerDashboard(state: SchedulerState): string {
   return `${lines.join("\n")}\n`;
 }
 
-export function schedulerRunnerEnvironment(ref: LaneRef, intent: SchedulerIntent, worker: WorkerProfilePayload): SchedulerRunnerEnvironment {
+export function schedulerRunnerEnvironment(ref: LaneRef, intent: SchedulerIntent, worker: WorkerProfilePayload, worktreeDir?: string): SchedulerRunnerEnvironment {
   return {
     CONTINUITY_PROJECT_ID: ref.projectId,
     CONTINUITY_TASK_ID: ref.taskId,
@@ -406,6 +411,7 @@ export function schedulerRunnerEnvironment(ref: LaneRef, intent: SchedulerIntent
     CONTINUITY_MODEL_FAMILIES: worker.modelFamilies?.join(",") ?? "",
     CONTINUITY_MODELS: worker.models?.join(",") ?? "",
     CONTINUITY_TOOLS: worker.tools?.join(",") ?? "",
+    CONTINUITY_WORKTREE_DIR: worktreeDir ?? "",
   };
 }
 
@@ -467,6 +473,7 @@ async function runWorker(
     intent: SchedulerIntent;
     ref: LaneRef;
     worker: WorkerProfilePayload;
+    workDir?: string;
   },
 ): Promise<RunnerOutcome> {
   if (runner === "fake") {
@@ -476,14 +483,14 @@ async function runWorker(
     };
   }
   if (!input.command) throw new Error(`--command is required for ${runner} runner`);
-  const env = schedulerRunnerEnvironment(input.ref, input.intent, input.worker);
-  if (runner === "command") return runShellCommand(input.command, input.timeoutMs, env);
-  return runTmuxCommand(input.command, input.tmuxSession ?? defaultTmuxRunnerSession(input.worker.workerId, input.intent.blockId), input.keepTmuxSession ?? true, input.timeoutMs, env);
+  const env = schedulerRunnerEnvironment(input.ref, input.intent, input.worker, input.workDir);
+  if (runner === "command") return runShellCommand(input.command, input.timeoutMs, env, input.workDir);
+  return runTmuxCommand(input.command, input.tmuxSession ?? defaultTmuxRunnerSession(input.worker.workerId, input.intent.blockId), input.keepTmuxSession ?? true, input.timeoutMs, env, input.workDir);
 }
 
-function runShellCommand(command: string, timeoutMs: number, env: SchedulerRunnerEnvironment): Promise<RunnerOutcome> {
+function runShellCommand(command: string, timeoutMs: number, env: SchedulerRunnerEnvironment, cwd?: string): Promise<RunnerOutcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, { env: { ...process.env, ...env }, shell: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, { cwd, env: { ...process.env, ...env }, shell: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -522,13 +529,16 @@ function runShellCommand(command: string, timeoutMs: number, env: SchedulerRunne
   });
 }
 
-async function runTmuxCommand(command: string, session: string, keepSession: boolean, timeoutMs: number, env: SchedulerRunnerEnvironment): Promise<RunnerOutcome> {
+async function runTmuxCommand(command: string, session: string, keepSession: boolean, timeoutMs: number, env: SchedulerRunnerEnvironment, cwd?: string): Promise<RunnerOutcome> {
   const channel = `continuity-${randomUUID()}`;
   const exports = Object.entries(env)
     .map(([key, value]) => `export ${key}=${shellQuote(value)}`)
     .join("\n");
   const wrapped = `${exports}\n${command}\ncode=$?\nprintf '\\n__CONTINUITY_EXIT__:%s\\n' "$code"\ntmux wait-for -S ${shellQuote(channel)}`;
-  await execProgram("tmux", ["new-session", "-d", "-s", session, "sh", "-lc", wrapped]);
+  const args = ["new-session", "-d", "-s", session];
+  if (cwd) args.push("-c", cwd);
+  args.push("sh", "-lc", wrapped);
+  await execProgram("tmux", args);
   await execProgram("tmux", ["wait-for", channel], timeoutMs);
   const captured = await execProgram("tmux", ["capture-pane", "-pt", session, "-S", "-"]);
   if (!keepSession) await execProgram("tmux", ["kill-session", "-t", session]);
@@ -635,6 +645,47 @@ function commandArtifacts(stdout: string, stderr: string): string[] | undefined 
 function appendLimited(current: string, chunk: string): string {
   const next = current + chunk;
   return next.length <= OUTPUT_LIMIT ? next : next.slice(next.length - OUTPUT_LIMIT);
+}
+
+async function prepareTaskWorktree(root: string, ref: LaneRef, intent: SchedulerIntent): Promise<string> {
+  const dir = path.resolve(root, safePathSegment(`${ref.projectId}-${ref.taskId}-${intent.blockId.slice(4, 12)}`));
+  if (await pathExists(dir)) return dir;
+  await mkdir(path.dirname(dir), { recursive: true });
+
+  if (await currentDirectoryIsGitCheckout()) {
+    try {
+      await execProgram("git", ["worktree", "add", "--detach", dir, "HEAD"]);
+      return dir;
+    } catch (error) {
+      if (!(await pathExists(dir))) throw error;
+      return dir;
+    }
+  }
+
+  await mkdir(dir, { recursive: true });
+  return dir;
+}
+
+async function currentDirectoryIsGitCheckout(): Promise<boolean> {
+  try {
+    await execProgram("git", ["rev-parse", "--is-inside-work-tree"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function pathExists(file: string): Promise<boolean> {
+  try {
+    await access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safePathSegment(value: string): string {
+  return value.replaceAll(/[^A-Za-z0-9_.-]/g, "-").replaceAll(/-+/g, "-").slice(0, 160);
 }
 
 function defaultTmuxRunnerSession(workerId: string, intentBlockId: string): string {

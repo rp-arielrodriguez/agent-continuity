@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { promisify } from "node:util";
 import { createEd25519Signer } from "../src/block.js";
 import { MemoryProvider } from "../src/provider.js";
+import { resolveSchedulerWorkerProfile, schedulerWorkerPreset } from "../src/scheduler-presets.js";
 import {
   deriveSchedulerState,
   loadSchedulerState,
@@ -14,6 +20,8 @@ import {
   workerMatchesIntent,
 } from "../src/scheduler.js";
 import { runSchedulerWorkerLoop } from "../src/scheduler-worker.js";
+
+const execFile = promisify(execFileCallback);
 
 const ref = {
   projectId: "rp-arielrodriguez/agent-continuity",
@@ -63,6 +71,23 @@ test("worker matching enforces agent, model, and tool requirements", () => {
     ),
     false,
   );
+});
+
+test("worker presets provide agent model tool and command defaults", () => {
+  const codex = schedulerWorkerPreset("codex");
+  assert.equal(codex.worker.agent, "codex");
+  assert.equal(codex.runner, "tmux");
+  assert.match(codex.command, /CONTINUITY_TASK_INSTRUCTIONS/);
+
+  const worker = resolveSchedulerWorkerProfile({
+    preset: "opencode",
+    nodeId: "a0263",
+    tools: ["shell", "browser", "git", "custom-tool"],
+  });
+  assert.equal(worker.workerId, "a0263-opencode");
+  assert.equal(worker.agent, "opencode");
+  assert.deepEqual(worker.tools, ["shell", "browser", "git", "custom-tool"]);
+  assert.deepEqual(worker.modelFamilies, ["gpt", "anthropic", "local"]);
 });
 
 test("runSchedulerOnce assigns a runnable intent and publishes a task result", async () => {
@@ -414,4 +439,94 @@ test("scheduler worker loop stops after idle limit", async () => {
   assert.equal(summary.runs, 0);
   assert.equal(summary.idle, 2);
   assert.equal(summary.iterations, 2);
+});
+
+test("scheduler worker loop enforces project command and timeout policy before running", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const worker = {
+    workerId: "policy-worker",
+    agent: "codex",
+    tools: ["shell"],
+  };
+
+  await assert.rejects(
+    runSchedulerWorkerLoop({
+      ...ref,
+      provider,
+      signer,
+      worker,
+      allowedProjectIds: ["other/project"],
+      idleLimit: 1,
+    }),
+    /not allowed/,
+  );
+
+  await assert.rejects(
+    runSchedulerWorkerLoop({
+      ...ref,
+      provider,
+      signer,
+      worker,
+      runner: "command",
+      command: "rm -rf /tmp/nope",
+      allowedCommands: ["codex", "claude"],
+      idleLimit: 1,
+    }),
+    /not in --allowed-commands/,
+  );
+
+  await assert.rejects(
+    runSchedulerWorkerLoop({
+      ...ref,
+      provider,
+      signer,
+      worker,
+      runnerTimeoutMs: 2000,
+      maxRunnerTimeoutMs: 1000,
+      idleLimit: 1,
+    }),
+    /exceeds --max-runner-timeout-ms/,
+  );
+});
+
+test("command runner executes inside per-task worktree root when configured", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const worktreeRoot = await mkdtemp(path.join(os.tmpdir(), "continuity-worktrees-"));
+
+  try {
+    await submitTaskIntent({
+      ...ref,
+      provider,
+      signer,
+      createdAt: "2026-07-05T22:40:00.000Z",
+      payload: {
+        title: "Worktree smoke",
+        instructions: "Run inside isolated worktree.",
+        requirements: { tools: ["shell"] },
+      },
+    });
+
+    const result = await runSchedulerOnce({
+      ...ref,
+      provider,
+      signer,
+      worker: {
+        workerId: "worktree-worker",
+        agent: "codex",
+        tools: ["shell"],
+      },
+      runner: "command",
+      command: `${process.execPath} -e ${JSON.stringify("console.log(process.cwd()); console.log(process.env.CONTINUITY_WORKTREE_DIR);")}`,
+      worktreeRoot,
+    });
+
+    assert.equal(result.status, "completed");
+    const artifacts = result.resultBlock?.payload.artifacts?.join("\n") ?? "";
+    assert.match(artifacts, new RegExp(worktreeRoot.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  } finally {
+    await execFile("git", ["worktree", "prune"]).catch(() => undefined);
+    await rm(worktreeRoot, { recursive: true, force: true });
+  }
 });

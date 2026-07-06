@@ -86,9 +86,7 @@ try {
 
     const workerA = await schedulerWorkerLoop("worker-a", taskId, {
       workerId: "worker-a-codex",
-      agent: "codex",
-      modelFamilies: "gpt",
-      tools: "shell,git",
+      preset: "codex",
       command: "printf worker-a-exclusive-ok",
       sync: true,
       maxRuns: 1,
@@ -98,9 +96,7 @@ try {
 
     const workerB = await schedulerWorkerLoop("worker-b", taskId, {
       workerId: "worker-b-codex",
-      agent: "codex",
-      modelFamilies: "gpt",
-      tools: "shell,git",
+      preset: "codex",
       command: "printf worker-b-should-not-run",
       sync: true,
       idleLimit: 1,
@@ -128,9 +124,7 @@ try {
 
     const codex = await schedulerWorkerLoop("worker-a", taskId, {
       workerId: "worker-a-codex",
-      agent: "codex",
-      modelFamilies: "gpt",
-      tools: "shell,git",
+      preset: "codex",
       command: "printf codex-should-not-run",
       sync: true,
       idleLimit: 1,
@@ -139,9 +133,7 @@ try {
 
     const opencode = await schedulerWorkerLoop("worker-b", taskId, {
       workerId: "worker-b-opencode",
-      agent: "opencode",
-      modelFamilies: "anthropic,gpt",
-      tools: "shell,git,browser",
+      preset: "opencode",
       command: "printf worker-b-opencode-ok",
       sync: true,
       maxRuns: 1,
@@ -169,17 +161,13 @@ try {
     const [workerA, workerB] = await Promise.all([
       schedulerWorkerLoop("worker-a", taskId, {
         workerId: "worker-a-codex",
-        agent: "codex",
-        modelFamilies: "gpt",
-        tools: "shell,git",
+        preset: "codex",
         command: "printf worker-a-speculative-ok",
         maxRuns: 1,
       }),
       schedulerWorkerLoop("worker-b", taskId, {
         workerId: "worker-b-codex",
-        agent: "codex",
-        modelFamilies: "gpt",
-        tools: "shell,git",
+        preset: "codex",
         command: "printf worker-b-speculative-ok",
         maxRuns: 1,
       }),
@@ -282,12 +270,6 @@ async function schedulerWorkerLoop(nodeName, taskId, input) {
     "scheduler",
     "--worker-id",
     input.workerId,
-    "--agent",
-    input.agent,
-    "--model-families",
-    input.modelFamilies,
-    "--tools",
-    input.tools,
     "--runner",
     "command",
     "--command",
@@ -296,10 +278,20 @@ async function schedulerWorkerLoop(nodeName, taskId, input) {
     nodeName,
     "--actor-id",
     `${nodeName}-${input.workerId}`,
+    "--allowed-project-ids",
+    projectId,
+    "--allowed-commands",
+    "printf",
+    "--max-runner-timeout-ms",
+    "5000",
     "--interval-ms",
     "0",
     "--json",
   ];
+  if (input.preset) args.push("--preset", input.preset);
+  else {
+    args.push("--agent", input.agent, "--model-families", input.modelFamilies, "--tools", input.tools);
+  }
   if (input.sync) args.push("--sync");
   if (input.maxRuns !== undefined) args.push("--max-runs", String(input.maxRuns));
   if (input.idleLimit !== undefined) args.push("--idle-limit", String(input.idleLimit));

@@ -77,11 +77,15 @@ future
 | Divergence | Divergent lane blocks report per-block rejection | unit | `daemon/internal/continuityd/peer_test.go` |
 | Lane isolation | Syncing one lane does not alter adjacent tasks or lanes | future | Needs acceptance case |
 | Daemon restart | DB state survives daemon restart | unit/local-e2e | SQLite store tests; acceptance restart scenario should be added |
-| Scheduler queue | Task intents enter a local mempool | future | Not implemented |
-| Exclusive scheduling | Fresh remote claim prevents duplicate local execution | future | Not implemented |
-| Speculative scheduling | Multiple isolated lanes produce candidate results | future | Not implemented |
-| Worker routing | Agent/model/tool capabilities choose eligible workers | future | Product model only |
-| tmux attach | Human can list workers and attach to agent sessions | future | Product model only |
+| Scheduler queue | Task intents enter a daemon-backed scheduler lane | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
+| Background workers | Worker loop syncs trusted peers and runs newly submitted tasks without prompt paste | local-e2e | acceptance smoke |
+| Exclusive scheduling | Fresh completed result prevents duplicate local execution | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
+| Speculative scheduling | Offline workers publish forked candidate results and adjudication selects a winner | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
+| Worker routing | Agent/model/tool capabilities choose eligible workers | unit/local-e2e | `test/scheduler.test.ts`, cluster lab |
+| Worker safety | Project/command/timeout policy gates runner execution | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
+| Worker presets | Codex/Claude/OpenCode presets fill worker and command defaults | unit/local-e2e | `test/scheduler.test.ts`, acceptance smoke |
+| Worktree isolation | Runner can execute from a task-specific worktree directory | unit | `test/scheduler.test.ts` |
+| tmux attach | Human can start/status/attach/stop worker loop sessions | local smoke | CLI tmux smoke |
 
 ## Current Executable Acceptance
 
@@ -104,6 +108,9 @@ This starts two temporary `continuityd` processes and validates:
 - trusted peer sync
 - daemon resume after sync
 - repeated sync idempotency
+- distributed scheduler task execution through `scheduler-worker-loop`
+- background scheduler worker loop discovering and running a new task without
+  manual prompting
 
 ## Cross-Machine Acceptance
 
@@ -135,7 +142,8 @@ The accepted proof is:
 - Add a local-e2e restart persistence scenario.
 - Add duplicate discovery, key-pinning, disabled-peer, partial-sync, and lane
   isolation acceptance cases.
-- Add scheduler intent/claim/lease acceptance once scheduler blocks exist.
-- Add tmux attach/list acceptance once runner sessions exist.
+- Add physical cross-machine worker-loop acceptance with both nodes already
+  running workers.
+- Add persisted worker profiles/config files for multiple named workers.
 - Add real S3/R2 and private HTTPS environment-backed smoke tests when
   credentials/endpoints are available.

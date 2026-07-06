@@ -41,6 +41,7 @@ import {
   submitTaskResult,
   type SchedulerRunner,
 } from "./scheduler.js";
+import { parseSchedulerWorkerPreset, schedulerWorkerPreset, resolveSchedulerWorkerProfile, type SchedulerWorkerPresetName } from "./scheduler-presets.js";
 import {
   attachTmuxSession,
   defaultSchedulerWorkerTmuxSession,
@@ -307,7 +308,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         provider,
         signer: signer.signer,
         createdAt: stringOption(parsed, "now"),
-        payload: workerProfilePayload(parsed),
+        payload: workerProfilePayload(parsed, signer.signer.nodeId),
       });
       const output = { block, keyPath: signer.keyPath, keyCreated: signer.created };
       if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
@@ -359,14 +360,15 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         ...ref,
         provider,
         signer: signer.signer,
-        worker: workerProfilePayload(parsed),
-        runner: schedulerRunnerOption(parsed),
-        command: stringOption(parsed, "command"),
+        worker: workerProfilePayload(parsed, signer.signer.nodeId),
+        runner: schedulerRunnerOption(parsed, schedulerWorkerPresetOption(parsed)?.runner),
+        command: schedulerWorkerCommandOption(parsed),
         tmuxSession: stringOption(parsed, "tmux-session"),
         keepTmuxSession: parsed.options["kill-tmux-session"] === true ? false : undefined,
         runnerTimeoutMs: numberOption(parsed, "runner-timeout-ms"),
         now: stringOption(parsed, "now"),
         leaseMs: numberOption(parsed, "lease-ms"),
+        worktreeRoot: stringOption(parsed, "worktree-root"),
       });
       const output = { ...result, sync, keyPath: signer.keyPath, keyCreated: signer.created };
       if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
@@ -391,13 +393,17 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         ...ref,
         provider,
         signer: signer.signer,
-        worker: workerProfilePayload(parsed),
-        runner: schedulerRunnerOption(parsed),
-        command: stringOption(parsed, "command"),
+        worker: workerProfilePayload(parsed, signer.signer.nodeId),
+        runner: schedulerRunnerOption(parsed, schedulerWorkerPresetOption(parsed)?.runner),
+        command: schedulerWorkerCommandOption(parsed),
         tmuxSession: stringOption(parsed, "tmux-session"),
         keepTmuxSession: parsed.options["kill-tmux-session"] === true ? false : undefined,
         runnerTimeoutMs: numberOption(parsed, "runner-timeout-ms"),
         leaseMs: numberOption(parsed, "lease-ms"),
+        allowedProjectIds: listOptions(parsed, "allowed-project-ids", "allow-project-ids"),
+        allowedCommands: listOption(parsed, "allowed-commands"),
+        maxRunnerTimeoutMs: numberOption(parsed, "max-runner-timeout-ms"),
+        worktreeRoot: stringOption(parsed, "worktree-root"),
         intervalMs: numberOption(parsed, "interval-ms"),
         maxRuns: numberOption(parsed, "max-runs"),
         idleLimit: numberOption(parsed, "idle-limit"),
@@ -415,10 +421,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       return;
     }
     case "scheduler-worker-start": {
-      const workerId = requiredOption(parsed, "worker-id");
-      const session = schedulerManagerTmuxSession(parsed, workerId);
-      const command = schedulerWorkerLoopCommand(parsed);
-      const status = await startTmuxSession({ session, command, cwd: process.cwd() });
+      const { status, command } = await startSchedulerWorkerFromParsed(parsed, config);
       if (parsed.options.json) console.log(JSON.stringify({ ...status, command }, null, 2));
       else {
         console.log(`session: ${status.session}`);
@@ -1108,7 +1111,10 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         keyFile: stringOption(parsed, "key-file"),
         timeoutMs: numberOption(parsed, "timeout-ms"),
       });
-      const output = { ...result, databaseUrl: maskDatabaseUrl(result.databaseUrl) };
+      const workerStart = parsed.options["start-worker"] === true
+        ? await startSchedulerWorkerFromParsed(installWorkerParsed(parsed), commandConfig(parsed))
+        : undefined;
+      const output = { ...result, databaseUrl: maskDatabaseUrl(result.databaseUrl), workerStart };
       if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
       else {
         console.log("install: complete");
@@ -1122,6 +1128,12 @@ Summary: ${taskId} imported ${result.imported} new journal entries
           if (result.migration.reason) console.log(`migrationReason: ${result.migration.reason}`);
           console.log(`migrationBlocks: ${result.migration.acceptedBlocks}`);
           console.log(`nodeKey: ${result.migration.keyPath}${result.migration.keyCreated ? " (created)" : ""}`);
+        }
+        if (workerStart) {
+          console.log("worker:");
+          console.log(`session: ${workerStart.status.session}`);
+          console.log(`running: ${workerStart.status.running ? "yes" : "no"}`);
+          console.log(`attach: continuity scheduler-worker-attach --manager-tmux-session ${workerStart.status.session}`);
         }
         if (!result.doctor.ok) process.exitCode = 1;
       }
@@ -1239,10 +1251,12 @@ async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, a
   });
 }
 
-function workerProfilePayload(parsed: ParsedArgs): WorkerProfilePayload {
-  return {
-    workerId: requiredOption(parsed, "worker-id"),
-    agent: requiredOption(parsed, "agent"),
+function workerProfilePayload(parsed: ParsedArgs, nodeId?: string): WorkerProfilePayload {
+  return resolveSchedulerWorkerProfile({
+    preset: schedulerWorkerPresetNameOption(parsed),
+    nodeId,
+    workerId: stringOption(parsed, "worker-id"),
+    agent: stringOption(parsed, "agent"),
     modelFamilies: listOrUndefined(parsed, "model-families"),
     models: listOrUndefined(parsed, "models"),
     tools: listOrUndefined(parsed, "tools"),
@@ -1250,7 +1264,72 @@ function workerProfilePayload(parsed: ParsedArgs): WorkerProfilePayload {
     tmuxSession: stringOption(parsed, "tmux-session"),
     endpoint: stringOption(parsed, "endpoint"),
     enabled: parsed.options.disabled === true ? false : true,
+  });
+}
+
+function schedulerWorkerPresetNameOption(parsed: ParsedArgs): SchedulerWorkerPresetName | undefined {
+  return parseSchedulerWorkerPreset(stringOption(parsed, "preset"));
+}
+
+function schedulerWorkerPresetOption(parsed: ParsedArgs): ReturnType<typeof schedulerWorkerPreset> | undefined {
+  const preset = schedulerWorkerPresetNameOption(parsed);
+  return preset ? schedulerWorkerPreset(preset) : undefined;
+}
+
+function schedulerWorkerCommandOption(parsed: ParsedArgs): string | undefined {
+  return stringOption(parsed, "command") ?? schedulerWorkerPresetOption(parsed)?.command;
+}
+
+async function startSchedulerWorkerFromParsed(parsed: ParsedArgs, config: ContinuityConfig): Promise<{ status: Awaited<ReturnType<typeof startTmuxSession>>; command: string }> {
+  const signer = await signerFromOptions(parsed, config, "scheduler-worker-cli");
+  const worker = workerProfilePayload(parsed, signer.signer.nodeId);
+  const session = schedulerManagerTmuxSession(parsed, worker.workerId);
+  const command = schedulerWorkerLoopCommand(parsed, { "worker-id": worker.workerId });
+  const status = await startTmuxSession({ session, command, cwd: process.cwd() });
+  return { status, command };
+}
+
+function installWorkerParsed(parsed: ParsedArgs): ParsedArgs {
+  const projectId = stringOption(parsed, "worker-project-id") ?? stringOption(parsed, "project-id");
+  const taskId = stringOption(parsed, "worker-task-id") ?? stringOption(parsed, "task-id");
+  if (!projectId || !taskId) throw new Error("--start-worker requires --worker-project-id and --worker-task-id, or install --project-id and --task-id");
+
+  const options: ParsedArgs["options"] = {
+    "project-id": projectId,
+    "task-id": taskId,
+    "lane-id": stringOption(parsed, "worker-lane-id") ?? "scheduler",
+    preset: stringOption(parsed, "worker-preset") ?? stringOption(parsed, "preset") ?? "codex",
+    sync: parsed.options["no-worker-sync"] === true ? false : true,
   };
+  copyOption(parsed, options, "home");
+  copyOption(parsed, options, "socket");
+  copyOption(parsed, options, "state-dir");
+  copyOption(parsed, options, "db");
+  copyOption(parsed, options, "timeout-ms");
+  copyOption(parsed, options, "node-id", "worker-node-id");
+  copyOption(parsed, options, "actor-id", "worker-actor-id");
+  copyOption(parsed, options, "key-file", "worker-key-file");
+  copyOption(parsed, options, "worker-id");
+  copyOption(parsed, options, "agent", "worker-agent");
+  copyOption(parsed, options, "model-families", "worker-model-families");
+  copyOption(parsed, options, "models", "worker-models");
+  copyOption(parsed, options, "tools", "worker-tools");
+  copyOption(parsed, options, "runner", "worker-runner");
+  copyOption(parsed, options, "command", "worker-command");
+  copyOption(parsed, options, "runner-timeout-ms", "worker-runner-timeout-ms");
+  copyOption(parsed, options, "max-runner-timeout-ms", "worker-max-runner-timeout-ms");
+  copyOption(parsed, options, "allowed-project-ids", "worker-allowed-project-ids");
+  copyOption(parsed, options, "allowed-commands", "worker-allowed-commands");
+  copyOption(parsed, options, "worktree-root", "worker-worktree-root");
+  copyOption(parsed, options, "interval-ms", "worker-interval-ms");
+  copyOption(parsed, options, "max-errors", "worker-max-errors");
+  copyOption(parsed, options, "manager-tmux-session", "worker-manager-tmux-session");
+  return { command: "scheduler-worker-start", options };
+}
+
+function copyOption(source: ParsedArgs, target: ParsedArgs["options"], targetName: string, sourceName = targetName): void {
+  const value = source.options[sourceName];
+  if (value !== undefined) target[targetName] = value;
 }
 
 function schedulerManagerTmuxSession(parsed: ParsedArgs, workerId: string | undefined): string {
@@ -1260,12 +1339,12 @@ function schedulerManagerTmuxSession(parsed: ParsedArgs, workerId: string | unde
   return defaultSchedulerWorkerTmuxSession(workerId);
 }
 
-function schedulerWorkerLoopCommand(parsed: ParsedArgs): string {
+function schedulerWorkerLoopCommand(parsed: ParsedArgs, overrides: Record<string, string | boolean | undefined> = {}): string {
   const cli = process.argv[1];
   if (!cli) throw new Error("cannot locate current continuity CLI entrypoint");
   const args = ["scheduler-worker-loop"];
   for (const name of schedulerWorkerLoopOptionNames()) {
-    const value = parsed.options[name];
+    const value = overrides[name] ?? parsed.options[name];
     if (value === undefined) continue;
     if (value === true) args.push(`--${name}`);
     else if (value !== false) args.push(`--${name}`, value);
@@ -1286,6 +1365,7 @@ function schedulerWorkerLoopOptionNames(): string[] {
     "key-file",
     "node-id",
     "actor-id",
+    "preset",
     "worker-id",
     "agent",
     "model-families",
@@ -1299,6 +1379,11 @@ function schedulerWorkerLoopOptionNames(): string[] {
     "tmux-session",
     "kill-tmux-session",
     "runner-timeout-ms",
+    "max-runner-timeout-ms",
+    "allowed-project-ids",
+    "allow-project-ids",
+    "allowed-commands",
+    "worktree-root",
     "lease-ms",
     "interval-ms",
     "max-runs",
@@ -1365,8 +1450,8 @@ function schedulerPolicyOption(parsed: ParsedArgs): TaskIntentPayload["policy"] 
   throw new Error(`unsupported --policy ${policy}; expected exclusive or speculative`);
 }
 
-function schedulerRunnerOption(parsed: ParsedArgs): SchedulerRunner {
-  const runner = stringOption(parsed, "runner") ?? "fake";
+function schedulerRunnerOption(parsed: ParsedArgs, fallback?: SchedulerRunner): SchedulerRunner {
+  const runner = stringOption(parsed, "runner") ?? fallback ?? "fake";
   if (runner === "fake" || runner === "command" || runner === "tmux") return runner;
   throw new Error(`unsupported --runner ${runner}; expected fake, command, or tmux`);
 }
@@ -1599,6 +1684,7 @@ Commands:
 Examples:
   continuity install
   continuity install --project-id PROJECT --task-id TASK --lane-id main
+  continuity install --start-worker --worker-project-id PROJECT --worker-task-id TASK --worker-preset codex
   continuity install --target all
   continuity uninstall
   continuity uninstall --delete-data
@@ -1614,10 +1700,10 @@ Examples:
   continuity status --json
   continuity dashboard --project-id PROJECT --task-id TASK --lane-id main
   continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
-  continuity scheduler-worker-register --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
+  continuity scheduler-worker-register --project-id PROJECT --task-id TASK --preset codex --node-id a0263
   continuity scheduler-run-once --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
-  continuity scheduler-worker-loop --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git --sync --runner tmux --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
-  continuity scheduler-worker-start --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git --sync --runner tmux --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+  continuity scheduler-worker-loop --project-id PROJECT --task-id TASK --preset codex --node-id a0263 --sync --allowed-project-ids PROJECT --allowed-commands codex
+  continuity scheduler-worker-start --project-id PROJECT --task-id TASK --preset codex --node-id a0263 --sync --allowed-project-ids PROJECT --allowed-commands codex
   continuity scheduler-worker-attach --worker-id a0263-codex
   continuity scheduler-adjudicate --project-id PROJECT --task-id TASK --intent-block-id INTENT --result-block-ids RESULT_A,RESULT_B --winner-result-block-id RESULT_A --summary "Selected best output"
   continuity scheduler-dashboard --project-id PROJECT --task-id TASK --sync

@@ -3,7 +3,7 @@ import { promisify } from "node:util";
 import type { ContinuitySigner, LaneRef, WorkerProfilePayload } from "./block.js";
 import type { PeerSyncResult } from "./daemon-provider.js";
 import type { ContinuityProvider } from "./provider.js";
-import { runSchedulerOnce, type SchedulerRunOnceResult, type SchedulerRunner } from "./scheduler.js";
+import { loadSchedulerState, runSchedulerOnce, type SchedulerRunOnceResult, type SchedulerRunner } from "./scheduler.js";
 
 const execFile = promisify(execFileCallback);
 const DEFAULT_LOOP_INTERVAL_MS = 5_000;
@@ -30,6 +30,10 @@ export interface SchedulerWorkerLoopInput extends LaneRef {
   keepTmuxSession?: boolean;
   runnerTimeoutMs?: number;
   leaseMs?: number;
+  allowedProjectIds?: string[];
+  allowedCommands?: string[];
+  maxRunnerTimeoutMs?: number;
+  worktreeRoot?: string;
   intervalMs?: number;
   maxRuns?: number;
   idleLimit?: number;
@@ -69,6 +73,8 @@ export async function runSchedulerWorkerLoop(input: SchedulerWorkerLoopInput): P
   const sleep = input.sleep ?? sleepMs;
   const intervalMs = input.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;
   const maxErrors = input.maxErrors ?? DEFAULT_MAX_ERRORS;
+  validateWorkerPolicy(input);
+  const runnerTimeoutMs = effectiveRunnerTimeoutMs(input);
   const startedAt = now();
   const startedAtMs = Date.now();
   let iterations = 0;
@@ -100,7 +106,10 @@ export async function runSchedulerWorkerLoop(input: SchedulerWorkerLoopInput): P
         await emit(input, { type: "sync", at: now(), sync });
       }
 
-      const result = await runSchedulerOnce({
+      const state = await loadSchedulerState(input.provider, input);
+      const result = state.intents.length === 0
+        ? idleResult(input)
+        : await runSchedulerOnce({
         projectId: input.projectId,
         taskId: input.taskId,
         laneId: input.laneId,
@@ -111,8 +120,9 @@ export async function runSchedulerWorkerLoop(input: SchedulerWorkerLoopInput): P
         command: input.command,
         tmuxSession: input.tmuxSession,
         keepTmuxSession: input.keepTmuxSession,
-        runnerTimeoutMs: input.runnerTimeoutMs,
+        runnerTimeoutMs,
         leaseMs: input.leaseMs,
+        worktreeRoot: input.worktreeRoot,
       });
 
       lastResult = result;
@@ -164,8 +174,42 @@ export async function runSchedulerWorkerLoop(input: SchedulerWorkerLoopInput): P
   return summary;
 }
 
+function idleResult(input: SchedulerWorkerLoopInput): SchedulerRunOnceResult {
+  return {
+    projectId: input.projectId,
+    taskId: input.taskId,
+    laneId: input.laneId,
+    status: "idle",
+    workerId: input.worker.workerId,
+    summary: `no scheduler task intents for worker ${input.worker.workerId}`,
+  };
+}
+
 export function defaultSchedulerWorkerTmuxSession(workerId: string): string {
   return `continuity-worker-${workerId.replaceAll(/[^A-Za-z0-9_.-]/g, "-")}`;
+}
+
+export function validateWorkerPolicy(input: Pick<SchedulerWorkerLoopInput, "projectId" | "command" | "runnerTimeoutMs" | "allowedProjectIds" | "allowedCommands" | "maxRunnerTimeoutMs">): void {
+  if (input.allowedProjectIds?.length && !input.allowedProjectIds.includes(input.projectId)) {
+    throw new Error(`project ${input.projectId} is not allowed for this worker`);
+  }
+  if (input.command && input.allowedCommands?.length && !input.allowedCommands.some((allowed) => commandMatchesAllowedPrefix(input.command!, allowed))) {
+    throw new Error(`worker command is not in --allowed-commands`);
+  }
+  if (input.runnerTimeoutMs !== undefined && input.maxRunnerTimeoutMs !== undefined && input.runnerTimeoutMs > input.maxRunnerTimeoutMs) {
+    throw new Error(`--runner-timeout-ms ${input.runnerTimeoutMs} exceeds --max-runner-timeout-ms ${input.maxRunnerTimeoutMs}`);
+  }
+}
+
+function effectiveRunnerTimeoutMs(input: Pick<SchedulerWorkerLoopInput, "runnerTimeoutMs" | "maxRunnerTimeoutMs">): number | undefined {
+  if (input.runnerTimeoutMs !== undefined) return input.runnerTimeoutMs;
+  return input.maxRunnerTimeoutMs;
+}
+
+function commandMatchesAllowedPrefix(command: string, allowedPrefix: string): boolean {
+  const normalizedCommand = command.trim();
+  const normalizedAllowed = allowedPrefix.trim();
+  return normalizedCommand === normalizedAllowed || normalizedCommand.startsWith(`${normalizedAllowed} `);
 }
 
 export async function startTmuxSession(input: { session: string; command: string; cwd?: string }): Promise<TmuxSessionStatus> {

@@ -500,6 +500,137 @@ try {
     assertEqual(dashboardResult.results[0].payload.workerId, "target-codex", "expected result to come from target worker");
   });
 
+  await scenario("background worker loop discovers and runs a new task without manual prompting", async () => {
+    const autonomousTaskId = `${schedulerTaskId}-autonomous`;
+    await run([
+      "peer-add",
+      "--socket",
+      target.socket,
+      "--endpoint",
+      sourceEndpoint,
+      "--name",
+      "source-node",
+      "--provider",
+      "acceptance",
+    ], { env });
+    await run([
+      "peer-add",
+      "--socket",
+      source.socket,
+      "--endpoint",
+      targetEndpoint,
+      "--name",
+      "target-node",
+      "--provider",
+      "acceptance",
+    ], { env });
+
+    const worker = startCli([
+      "scheduler-worker-loop",
+      "--socket",
+      target.socket,
+      "--state-dir",
+      target.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      autonomousTaskId,
+      "--lane-id",
+      "scheduler",
+      "--preset",
+      "codex",
+      "--node-id",
+      "target-node",
+      "--actor-id",
+      "target-autonomous-worker",
+      "--sync",
+      "--runner",
+      "command",
+      "--command",
+      "printf autonomous-worker-ok",
+      "--allowed-project-ids",
+      projectId,
+      "--allowed-commands",
+      "printf",
+      "--max-runner-timeout-ms",
+      "2000",
+      "--max-runs",
+      "1",
+      "--interval-ms",
+      "250",
+      "--duration-ms",
+      "15000",
+      "--json",
+    ], { env });
+
+    await delay(500);
+    await run([
+      "scheduler-task-submit",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      autonomousTaskId,
+      "--lane-id",
+      "scheduler",
+      "--title",
+      "Autonomous scheduler smoke",
+      "--instructions",
+      "A background worker loop should discover and run this task.",
+      "--requires-agents",
+      "codex",
+      "--requires-model-families",
+      "gpt",
+      "--requires-tools",
+      "shell,git",
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-orchestrator",
+      "--json",
+    ], { env });
+
+    const workerOutput = JSON.parse((await waitForChild(worker, 20_000)).stdout);
+    assertEqual(workerOutput.summary.lastResult.status, "completed", "expected background worker to complete after task appears");
+    assertEqual(workerOutput.summary.lastResult.workerId, "target-node-codex", "expected preset worker id to be inferred from node id");
+    assertIncludes(workerOutput.summary.lastResult.resultBlock.payload.artifacts.join("\n"), "autonomous-worker-ok");
+
+    const sourceResultSync = await run([
+      "peer-sync",
+      "--socket",
+      source.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      autonomousTaskId,
+      "--lane-id",
+      "scheduler",
+      "--json",
+    ], { env });
+    const sourceResultSyncResult = JSON.parse(sourceResultSync.stdout);
+    assertAtLeast(sourceResultSyncResult.insertedBlocks, 3, "expected source to import autonomous worker profile, assignment, and result");
+    assertEqual(sourceResultSyncResult.rejectedBlocks, 0, "expected no source autonomous scheduler sync rejections");
+
+    const dashboard = await run([
+      "scheduler-dashboard",
+      "--socket",
+      source.socket,
+      "--project-id",
+      projectId,
+      "--task-id",
+      autonomousTaskId,
+      "--lane-id",
+      "scheduler",
+      "--json",
+    ], { env });
+    const dashboardResult = JSON.parse(dashboard.stdout);
+    assertEqual(dashboardResult.counts.completed, 1, "expected source dashboard to show autonomous completion");
+    assertEqual(dashboardResult.results[0].payload.workerId, "target-node-codex", "expected autonomous result to come from inferred preset worker");
+  });
+
   console.log("\nacceptance-smoke: passed");
 } finally {
   if (httpServer) await closeHttp(httpServer);
@@ -602,6 +733,40 @@ function run(args, options = {}) {
       }
       return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code };
     });
+}
+
+function startCli(args, options = {}) {
+  const env = options.env ?? process.env;
+  const child = spawn(process.execPath, [cli, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  return { args, child, stdout: () => stdout, stderr: () => stderr };
+}
+
+function waitForChild(started, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      started.child.kill("SIGTERM");
+      reject(new Error(`continuity ${started.args.join(" ")} timed out after ${timeoutMs}ms\nstdout:\n${started.stdout()}\nstderr:\n${started.stderr()}`));
+    }, timeoutMs);
+    started.child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) resolve({ stdout: started.stdout(), stderr: started.stderr() });
+      else reject(new Error(`continuity ${started.args.join(" ")} exited with ${code ?? signal}\nstdout:\n${started.stdout()}\nstderr:\n${started.stderr()}`));
+    });
+    started.child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 async function freePort() {

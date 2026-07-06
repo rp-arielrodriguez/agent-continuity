@@ -28,6 +28,10 @@ Current implementation:
   and publishes results for one worker profile.
 - `continuity scheduler-worker-start/status/attach/stop` run that loop in tmux
   as a local operator frontend.
+- `--preset codex|claude|opencode` provides agent/model/tool/command defaults
+  while allowing explicit overrides.
+- `--allowed-project-ids`, `--allowed-commands`, `--max-runner-timeout-ms`, and
+  `--worktree-root` provide local safety boundaries for scheduled execution.
 - `continuity scheduler-adjudicate` records result selection and collapses
   forked scheduler heads after speculative competition.
 
@@ -164,6 +168,28 @@ That allows stable runner commands such as:
 codex exec "$CONTINUITY_TASK_INSTRUCTIONS"
 claude -p "$CONTINUITY_TASK_INSTRUCTIONS"
 opencode run "$CONTINUITY_TASK_INSTRUCTIONS"
+```
+
+Preset commands use that convention by default:
+
+```text
+codex    -> codex exec "$CONTINUITY_TASK_INSTRUCTIONS"
+claude   -> claude -p "$CONTINUITY_TASK_INSTRUCTIONS"
+opencode -> opencode run "$CONTINUITY_TASK_INSTRUCTIONS"
+```
+
+Workers should normally be started with explicit local constraints:
+
+```bash
+continuity scheduler-worker-start \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --preset codex \
+  --sync \
+  --allowed-project-ids rp-arielrodriguez/agent-continuity \
+  --allowed-commands codex \
+  --max-runner-timeout-ms 3600000 \
+  --worktree-root ~/.local/state/agent-continuity/worktrees
 ```
 
 ## Native-Feeling Agent Interface
