@@ -6,12 +6,14 @@ import {
   deriveSchedulerState,
   loadSchedulerState,
   runSchedulerOnce,
+  schedulerRunnerEnvironment,
   selectRunnableIntent,
   submitTaskAdjudication,
   submitTaskAssignment,
   submitTaskIntent,
   workerMatchesIntent,
 } from "../src/scheduler.js";
+import { runSchedulerWorkerLoop } from "../src/scheduler-worker.js";
 
 const ref = {
   projectId: "rp-arielrodriguez/agent-continuity",
@@ -301,4 +303,115 @@ test("command runner timeout is recorded as a failed result", async () => {
 
   assert.equal(result.status, "failed");
   assert.match(result.resultBlock?.payload.summary ?? "", /timed out/);
+});
+
+test("command runner receives scheduler task context as environment", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const intent = await submitTaskIntent({
+    ...ref,
+    provider,
+    signer,
+    createdAt: "2026-07-05T22:25:00.000Z",
+    payload: {
+      title: "Context smoke",
+      instructions: "Read task context from environment.",
+      requirements: { tools: ["shell"] },
+    },
+  });
+
+  const result = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:26:00.000Z",
+    worker: {
+      workerId: "a0263-command",
+      agent: "codex",
+      tools: ["shell"],
+    },
+    runner: "command",
+    command: `${process.execPath} -e ${JSON.stringify("console.log(process.env.CONTINUITY_TASK_TITLE); console.log(process.env.CONTINUITY_TASK_INSTRUCTIONS); console.log(process.env.CONTINUITY_INTENT_BLOCK_ID);")}`,
+  });
+
+  assert.equal(result.status, "completed");
+  const artifacts = result.resultBlock?.payload.artifacts?.join("\n") ?? "";
+  assert.match(artifacts, /Context smoke/);
+  assert.match(artifacts, /Read task context from environment/);
+  assert.match(artifacts, new RegExp(intent.blockId));
+
+  const env = schedulerRunnerEnvironment(ref, result.intent!, {
+    workerId: "a0263-command",
+    agent: "codex",
+    tools: ["shell"],
+  });
+  assert.equal(env.CONTINUITY_TASK_TITLE, "Context smoke");
+  assert.equal(env.CONTINUITY_WORKER_ID, "a0263-command");
+});
+
+test("scheduler worker loop runs queued tasks until max-runs", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  for (const title of ["Loop smoke A", "Loop smoke B"]) {
+    await submitTaskIntent({
+      ...ref,
+      provider,
+      signer,
+      createdAt: "2026-07-05T22:30:00.000Z",
+      payload: {
+        title,
+        instructions: `Run ${title}.`,
+        requirements: { tools: ["shell"] },
+      },
+    });
+  }
+
+  const events: string[] = [];
+  const summary = await runSchedulerWorkerLoop({
+    ...ref,
+    provider,
+    signer,
+    worker: {
+      workerId: "loop-worker",
+      agent: "codex",
+      tools: ["shell"],
+    },
+    intervalMs: 0,
+    maxRuns: 2,
+    onEvent: (event) => {
+      events.push(event.type);
+    },
+  });
+
+  assert.equal(summary.stopReason, "max-runs");
+  assert.equal(summary.runs, 2);
+  assert.equal(summary.completed, 2);
+  assert.equal(summary.idle, 0);
+  assert.deepEqual(events.filter((event) => event === "result").length, 2);
+
+  const state = await loadSchedulerState(provider, ref);
+  assert.equal(state.counts.completed, 2);
+});
+
+test("scheduler worker loop stops after idle limit", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+
+  const summary = await runSchedulerWorkerLoop({
+    ...ref,
+    provider,
+    signer,
+    worker: {
+      workerId: "idle-worker",
+      agent: "codex",
+      tools: ["shell"],
+    },
+    intervalMs: 0,
+    idleLimit: 2,
+  });
+
+  assert.equal(summary.stopReason, "idle-limit");
+  assert.equal(summary.runs, 0);
+  assert.equal(summary.idle, 2);
+  assert.equal(summary.iterations, 2);
 });

@@ -41,6 +41,15 @@ import {
   submitTaskResult,
   type SchedulerRunner,
 } from "./scheduler.js";
+import {
+  attachTmuxSession,
+  defaultSchedulerWorkerTmuxSession,
+  runSchedulerWorkerLoop,
+  startTmuxSession,
+  stopTmuxSession,
+  tmuxSessionStatus,
+  type SchedulerWorkerLoopEvent,
+} from "./scheduler-worker.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
@@ -370,6 +379,79 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         if (result.resultBlock) console.log(`result: ${result.resultBlock.blockId}`);
         console.log(`summary: ${result.summary}`);
       }
+      return;
+    }
+    case "scheduler-worker-loop": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-worker-cli");
+      const events: SchedulerWorkerLoopEvent[] = [];
+      const json = parsed.options.json === true;
+      const summary = await runSchedulerWorkerLoop({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        worker: workerProfilePayload(parsed),
+        runner: schedulerRunnerOption(parsed),
+        command: stringOption(parsed, "command"),
+        tmuxSession: stringOption(parsed, "tmux-session"),
+        keepTmuxSession: parsed.options["kill-tmux-session"] === true ? false : undefined,
+        runnerTimeoutMs: numberOption(parsed, "runner-timeout-ms"),
+        leaseMs: numberOption(parsed, "lease-ms"),
+        intervalMs: numberOption(parsed, "interval-ms"),
+        maxRuns: numberOption(parsed, "max-runs"),
+        idleLimit: numberOption(parsed, "idle-limit"),
+        durationMs: numberOption(parsed, "duration-ms"),
+        maxErrors: numberOption(parsed, "max-errors"),
+        syncBeforeRun: parsed.options.sync === true ? () => provider.syncTrustedPeers(ref) : undefined,
+        onEvent: (event) => {
+          if (json) events.push(event);
+          else printSchedulerWorkerLoopEvent(event);
+        },
+      });
+      const output = { summary, events, keyPath: signer.keyPath, keyCreated: signer.created };
+      if (json) console.log(JSON.stringify(output, null, 2));
+      else printSchedulerWorkerLoopSummary(summary);
+      return;
+    }
+    case "scheduler-worker-start": {
+      const workerId = requiredOption(parsed, "worker-id");
+      const session = schedulerManagerTmuxSession(parsed, workerId);
+      const command = schedulerWorkerLoopCommand(parsed);
+      const status = await startTmuxSession({ session, command, cwd: process.cwd() });
+      if (parsed.options.json) console.log(JSON.stringify({ ...status, command }, null, 2));
+      else {
+        console.log(`session: ${status.session}`);
+        console.log(`running: ${status.running ? "yes" : "no"}`);
+        console.log(`attach: continuity scheduler-worker-attach --manager-tmux-session ${status.session}`);
+      }
+      return;
+    }
+    case "scheduler-worker-status": {
+      const session = schedulerManagerTmuxSession(parsed, stringOption(parsed, "worker-id"));
+      const status = await tmuxSessionStatus({ session, tailLines: numberOption(parsed, "tail-lines") });
+      if (parsed.options.json) console.log(JSON.stringify(status, null, 2));
+      else {
+        console.log(`session: ${status.session}`);
+        console.log(`running: ${status.running ? "yes" : "no"}`);
+        if (status.tail) console.log(`tail:\n${status.tail}`);
+      }
+      return;
+    }
+    case "scheduler-worker-stop": {
+      const session = schedulerManagerTmuxSession(parsed, stringOption(parsed, "worker-id"));
+      const status = await stopTmuxSession({ session });
+      if (parsed.options.json) console.log(JSON.stringify(status, null, 2));
+      else {
+        console.log(`session: ${status.session}`);
+        console.log("running: no");
+      }
+      return;
+    }
+    case "scheduler-worker-attach": {
+      const session = schedulerManagerTmuxSession(parsed, stringOption(parsed, "worker-id"));
+      const code = await attachTmuxSession({ session });
+      process.exitCode = code;
       return;
     }
     case "scheduler-result": {
@@ -1171,6 +1253,92 @@ function workerProfilePayload(parsed: ParsedArgs): WorkerProfilePayload {
   };
 }
 
+function schedulerManagerTmuxSession(parsed: ParsedArgs, workerId: string | undefined): string {
+  const session = stringOption(parsed, "manager-tmux-session");
+  if (session) return session;
+  if (!workerId) throw new Error("missing required option --worker-id or --manager-tmux-session");
+  return defaultSchedulerWorkerTmuxSession(workerId);
+}
+
+function schedulerWorkerLoopCommand(parsed: ParsedArgs): string {
+  const cli = process.argv[1];
+  if (!cli) throw new Error("cannot locate current continuity CLI entrypoint");
+  const args = ["scheduler-worker-loop"];
+  for (const name of schedulerWorkerLoopOptionNames()) {
+    const value = parsed.options[name];
+    if (value === undefined) continue;
+    if (value === true) args.push(`--${name}`);
+    else if (value !== false) args.push(`--${name}`, value);
+  }
+  return shellJoin([process.execPath, cli, ...args]);
+}
+
+function schedulerWorkerLoopOptionNames(): string[] {
+  return [
+    "home",
+    "socket",
+    "state-dir",
+    "db",
+    "timeout-ms",
+    "project-id",
+    "task-id",
+    "lane-id",
+    "key-file",
+    "node-id",
+    "actor-id",
+    "worker-id",
+    "agent",
+    "model-families",
+    "models",
+    "tools",
+    "max-concurrent",
+    "endpoint",
+    "disabled",
+    "runner",
+    "command",
+    "tmux-session",
+    "kill-tmux-session",
+    "runner-timeout-ms",
+    "lease-ms",
+    "interval-ms",
+    "max-runs",
+    "idle-limit",
+    "duration-ms",
+    "max-errors",
+    "sync",
+  ];
+}
+
+function printSchedulerWorkerLoopEvent(event: SchedulerWorkerLoopEvent): void {
+  if (event.type === "sync" && event.sync) {
+    console.log(`[${event.at}] sync inserted=${event.sync.insertedBlocks} rejected=${event.sync.rejectedBlocks}`);
+  } else if (event.type === "result" && event.result) {
+    const intent = event.result.intent ? ` intent=${event.result.intent.blockId}` : "";
+    const result = event.result.resultBlock ? ` result=${event.result.resultBlock.blockId}` : "";
+    console.log(`[${event.at}] worker=${event.result.workerId} status=${event.result.status}${intent}${result} summary=${event.result.summary}`);
+  } else if (event.type === "error") {
+    console.log(`[${event.at}] error=${event.error ?? "unknown"}`);
+  } else if (event.type === "stop") {
+    console.log(`[${event.at}] stop=${event.stopReason ?? "unknown"}`);
+  }
+}
+
+function printSchedulerWorkerLoopSummary(summary: Awaited<ReturnType<typeof runSchedulerWorkerLoop>>): void {
+  console.log(`worker: ${summary.workerId}`);
+  console.log(`project: ${summary.projectId}`);
+  console.log(`task: ${summary.taskId}`);
+  console.log(`lane: ${summary.laneId}`);
+  console.log(`stop: ${summary.stopReason}`);
+  console.log(`iterations: ${summary.iterations}`);
+  console.log(`runs: ${summary.runs}`);
+  console.log(`idle: ${summary.idle}`);
+  console.log(`completed: ${summary.completed}`);
+  console.log(`failed: ${summary.failed}`);
+  console.log(`blocked: ${summary.blocked}`);
+  console.log(`cancelled: ${summary.cancelled}`);
+  console.log(`errors: ${summary.errors}`);
+}
+
 async function instructionsOption(parsed: ParsedArgs): Promise<string> {
   const instructions = stringOption(parsed, "instructions");
   const instructionsFile = stringOption(parsed, "instructions-file");
@@ -1212,6 +1380,14 @@ function schedulerResultStatusOption(parsed: ParsedArgs): TaskResultPayload["sta
 function listOrUndefined(parsed: ParsedArgs, name: string): string[] | undefined {
   const values = listOption(parsed, name);
   return values.length > 0 ? values : undefined;
+}
+
+function shellJoin(args: string[]): string {
+  return args.map(shellQuote).join(" ");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function requiredOption(parsed: ParsedArgs, name: string): string {
@@ -1382,6 +1558,11 @@ Commands:
   scheduler-task-submit Submit a task intent into a scheduler lane
   scheduler-worker-register Register a worker profile in a scheduler lane
   scheduler-run-once Sync optionally, claim one runnable task, and publish a result
+  scheduler-worker-loop Run a continuous scheduler worker loop
+  scheduler-worker-start Start a scheduler worker loop in tmux
+  scheduler-worker-status Show scheduler worker tmux status and tail
+  scheduler-worker-stop Stop a scheduler worker tmux loop
+  scheduler-worker-attach Attach to a scheduler worker tmux loop
   scheduler-result Publish a manual task result for an assignment
   scheduler-adjudicate Select/record a winning result and merge scheduler heads
   daemon-install Build/install the local continuityd daemon binary
@@ -1435,6 +1616,9 @@ Examples:
   continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
   continuity scheduler-worker-register --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
   continuity scheduler-run-once --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
+  continuity scheduler-worker-loop --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git --sync --runner tmux --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+  continuity scheduler-worker-start --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git --sync --runner tmux --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+  continuity scheduler-worker-attach --worker-id a0263-codex
   continuity scheduler-adjudicate --project-id PROJECT --task-id TASK --intent-block-id INTENT --result-block-ids RESULT_A,RESULT_B --winner-result-block-id RESULT_A --summary "Selected best output"
   continuity scheduler-dashboard --project-id PROJECT --task-id TASK --sync
   continuity peer-invite-create --endpoint tcp://10.44.110.222:9987

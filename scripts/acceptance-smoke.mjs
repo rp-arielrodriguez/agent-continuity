@@ -422,7 +422,7 @@ try {
     assertEqual(targetInitialSyncResult.rejectedBlocks, 0, "expected no target scheduler sync rejections");
 
     const targetRun = await run([
-      "scheduler-run-once",
+      "scheduler-worker-loop",
       "--socket",
       target.socket,
       "--state-dir",
@@ -445,13 +445,15 @@ try {
       "target-node",
       "--actor-id",
       "target-worker",
-      "--now",
-      "2026-07-05T21:11:00.000Z",
+      "--max-runs",
+      "1",
+      "--interval-ms",
+      "0",
       "--json",
     ], { env });
     const targetRunResult = JSON.parse(targetRun.stdout);
-    assertEqual(targetRunResult.status, "completed", "expected target worker to complete scheduler task");
-    assertIncludes(targetRunResult.resultBlock.blockId, "blk_");
+    assertEqual(targetRunResult.summary.lastResult.status, "completed", "expected target worker to complete scheduler task");
+    assertIncludes(targetRunResult.summary.lastResult.resultBlock.blockId, "blk_");
 
     await run([
       "peer-add",

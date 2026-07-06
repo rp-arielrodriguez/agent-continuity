@@ -21,6 +21,16 @@ The scheduler is a layer above `continuityd`. `continuityd` owns signed blocks,
 peer sync, trust, leases, and projections. The scheduler owns task assignment and
 local runner supervision.
 
+Current implementation:
+
+- `continuity scheduler-task-submit` writes signed task intents.
+- `continuity scheduler-worker-loop` continuously syncs, matches, assigns, runs,
+  and publishes results for one worker profile.
+- `continuity scheduler-worker-start/status/attach/stop` run that loop in tmux
+  as a local operator frontend.
+- `continuity scheduler-adjudicate` records result selection and collapses
+  forked scheduler heads after speculative competition.
+
 ## Agent, Model, And Tool Capabilities
 
 Do not model an agent as if it were a model. Agents are harnesses. Models are
@@ -124,12 +134,37 @@ scheduler
 continuity dashboard
   lists workers, tasks, claims, checkpoints, and sessions
 
-continuity attach <worker-or-task>
+continuity scheduler-worker-attach <worker-or-task>
   attaches to the underlying tmux session
 ```
 
 Continuity blocks remain the distributed source of truth. tmux is how a human
 sees or intervenes in a local runner.
+
+Worker loops expose task context to runner commands through environment
+variables rather than command-string interpolation:
+
+```text
+CONTINUITY_PROJECT_ID
+CONTINUITY_TASK_ID
+CONTINUITY_LANE_ID
+CONTINUITY_INTENT_BLOCK_ID
+CONTINUITY_TASK_TITLE
+CONTINUITY_TASK_INSTRUCTIONS
+CONTINUITY_WORKER_ID
+CONTINUITY_AGENT
+CONTINUITY_MODEL_FAMILIES
+CONTINUITY_MODELS
+CONTINUITY_TOOLS
+```
+
+That allows stable runner commands such as:
+
+```bash
+codex exec "$CONTINUITY_TASK_INSTRUCTIONS"
+claude -p "$CONTINUITY_TASK_INSTRUCTIONS"
+opencode run "$CONTINUITY_TASK_INSTRUCTIONS"
+```
 
 ## Native-Feeling Agent Interface
 

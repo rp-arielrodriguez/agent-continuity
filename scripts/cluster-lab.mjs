@@ -84,26 +84,28 @@ try {
       tools: "shell,git",
     });
 
-    const workerA = await schedulerRun("worker-a", taskId, {
+    const workerA = await schedulerWorkerLoop("worker-a", taskId, {
       workerId: "worker-a-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf worker-a-exclusive-ok",
       sync: true,
+      maxRuns: 1,
     });
-    assertEqual(workerA.status, "completed", "worker-a should complete exclusive task");
+    assertEqual(workerA.summary.lastResult.status, "completed", "worker-a should complete exclusive task");
     assertArtifactsInclude(workerA, "worker-a-exclusive-ok");
 
-    const workerB = await schedulerRun("worker-b", taskId, {
+    const workerB = await schedulerWorkerLoop("worker-b", taskId, {
       workerId: "worker-b-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf worker-b-should-not-run",
       sync: true,
+      idleLimit: 1,
     });
-    assertEqual(workerB.status, "idle", "worker-b should idle after seeing worker-a result");
+    assertEqual(workerB.summary.lastResult.status, "idle", "worker-b should idle after seeing worker-a result");
 
     await peerSync("orchestrator", taskId);
     const dashboard = await schedulerDashboard("orchestrator", taskId);
@@ -124,25 +126,27 @@ try {
       tools: "shell,browser",
     });
 
-    const codex = await schedulerRun("worker-a", taskId, {
+    const codex = await schedulerWorkerLoop("worker-a", taskId, {
       workerId: "worker-a-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf codex-should-not-run",
       sync: true,
+      idleLimit: 1,
     });
-    assertEqual(codex.status, "idle", "codex worker should not match opencode/anthropic/browser requirements");
+    assertEqual(codex.summary.lastResult.status, "idle", "codex worker should not match opencode/anthropic/browser requirements");
 
-    const opencode = await schedulerRun("worker-b", taskId, {
+    const opencode = await schedulerWorkerLoop("worker-b", taskId, {
       workerId: "worker-b-opencode",
       agent: "opencode",
       modelFamilies: "anthropic,gpt",
       tools: "shell,git,browser",
       command: "printf worker-b-opencode-ok",
       sync: true,
+      maxRuns: 1,
     });
-    assertEqual(opencode.status, "completed", "opencode worker should complete capability-routed task");
+    assertEqual(opencode.summary.lastResult.status, "completed", "opencode worker should complete capability-routed task");
     assertArtifactsInclude(opencode, "worker-b-opencode-ok");
 
     await peerSync("orchestrator", taskId);
@@ -163,23 +167,25 @@ try {
     });
     await Promise.all([peerSync("worker-a", taskId), peerSync("worker-b", taskId)]);
     const [workerA, workerB] = await Promise.all([
-      schedulerRun("worker-a", taskId, {
+      schedulerWorkerLoop("worker-a", taskId, {
         workerId: "worker-a-codex",
         agent: "codex",
         modelFamilies: "gpt",
         tools: "shell,git",
         command: "printf worker-a-speculative-ok",
+        maxRuns: 1,
       }),
-      schedulerRun("worker-b", taskId, {
+      schedulerWorkerLoop("worker-b", taskId, {
         workerId: "worker-b-codex",
         agent: "codex",
         modelFamilies: "gpt",
         tools: "shell,git",
         command: "printf worker-b-speculative-ok",
+        maxRuns: 1,
       }),
     ]);
-    assertEqual(workerA.status, "completed", "worker-a should complete speculative task");
-    assertEqual(workerB.status, "completed", "worker-b should complete speculative task");
+    assertEqual(workerA.summary.lastResult.status, "completed", "worker-a should complete speculative task");
+    assertEqual(workerB.summary.lastResult.status, "completed", "worker-b should complete speculative task");
 
     await peerSync("orchestrator", taskId);
     const dashboard = await schedulerDashboard("orchestrator", taskId);
@@ -265,9 +271,9 @@ async function submitTask(nodeName, taskId, input) {
   ]);
 }
 
-async function schedulerRun(nodeName, taskId, input) {
+async function schedulerWorkerLoop(nodeName, taskId, input) {
   const args = [
-    "scheduler-run-once",
+    "scheduler-worker-loop",
     "--project-id",
     projectId,
     "--task-id",
@@ -290,9 +296,13 @@ async function schedulerRun(nodeName, taskId, input) {
     nodeName,
     "--actor-id",
     `${nodeName}-${input.workerId}`,
+    "--interval-ms",
+    "0",
     "--json",
   ];
   if (input.sync) args.push("--sync");
+  if (input.maxRuns !== undefined) args.push("--max-runs", String(input.maxRuns));
+  if (input.idleLimit !== undefined) args.push("--idle-limit", String(input.idleLimit));
   return jsonContinuity(nodeName, args);
 }
 
@@ -407,6 +417,6 @@ function assertIncludes(value, expected, message = "expected value to include su
 }
 
 function assertArtifactsInclude(result, expected) {
-  const artifacts = result.artifacts ?? result.resultBlock?.payload?.artifacts ?? [];
+  const artifacts = result.artifacts ?? result.resultBlock?.payload?.artifacts ?? result.summary?.lastResult?.resultBlock?.payload?.artifacts ?? [];
   assertIncludes(artifacts.join("\n"), expected, "expected scheduler artifacts to include command output");
 }

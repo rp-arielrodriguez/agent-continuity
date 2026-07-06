@@ -121,6 +121,8 @@ interface RunnerOutcome {
   tmuxSession?: string;
 }
 
+export type SchedulerRunnerEnvironment = Record<string, string>;
+
 export async function loadSchedulerState(provider: ContinuityProvider, ref: LaneRef): Promise<SchedulerState> {
   const [status, blocks] = await Promise.all([provider.status(ref), provider.blocks(ref)]);
   return deriveSchedulerState(ref, blocks, status.lane.tip, status.lane.heads);
@@ -289,6 +291,7 @@ export async function runSchedulerOnce(input: SchedulerRunOnceInput): Promise<Sc
     keepTmuxSession: input.keepTmuxSession,
     timeoutMs: input.runnerTimeoutMs ?? DEFAULT_RUNNER_TIMEOUT_MS,
     intent: selected,
+    ref,
     worker: input.worker,
   }).catch((error: unknown): RunnerOutcome => ({
     status: "failed",
@@ -388,6 +391,24 @@ export function renderSchedulerDashboard(state: SchedulerState): string {
   return `${lines.join("\n")}\n`;
 }
 
+export function schedulerRunnerEnvironment(ref: LaneRef, intent: SchedulerIntent, worker: WorkerProfilePayload): SchedulerRunnerEnvironment {
+  return {
+    CONTINUITY_PROJECT_ID: ref.projectId,
+    CONTINUITY_TASK_ID: ref.taskId,
+    CONTINUITY_LANE_ID: ref.laneId,
+    CONTINUITY_INTENT_BLOCK_ID: intent.blockId,
+    CONTINUITY_TASK_TITLE: intent.payload.title,
+    CONTINUITY_TASK_INSTRUCTIONS: intent.payload.instructions,
+    CONTINUITY_TARGET_LANE_ID: intent.payload.targetLaneId ?? "",
+    CONTINUITY_TASK_POLICY: intent.payload.policy ?? "exclusive",
+    CONTINUITY_WORKER_ID: worker.workerId,
+    CONTINUITY_AGENT: worker.agent,
+    CONTINUITY_MODEL_FAMILIES: worker.modelFamilies?.join(",") ?? "",
+    CONTINUITY_MODELS: worker.models?.join(",") ?? "",
+    CONTINUITY_TOOLS: worker.tools?.join(",") ?? "",
+  };
+}
+
 async function appendSchedulerBlock<TPayload extends TaskBlockPayload>(
   input: SchedulerSubmitInput<TPayload>,
 ): Promise<TaskBlock<TPayload>> {
@@ -444,6 +465,7 @@ async function runWorker(
     keepTmuxSession?: boolean;
     timeoutMs: number;
     intent: SchedulerIntent;
+    ref: LaneRef;
     worker: WorkerProfilePayload;
   },
 ): Promise<RunnerOutcome> {
@@ -454,13 +476,14 @@ async function runWorker(
     };
   }
   if (!input.command) throw new Error(`--command is required for ${runner} runner`);
-  if (runner === "command") return runShellCommand(input.command, input.timeoutMs);
-  return runTmuxCommand(input.command, input.tmuxSession ?? `continuity-${input.worker.workerId}`, input.keepTmuxSession ?? true, input.timeoutMs);
+  const env = schedulerRunnerEnvironment(input.ref, input.intent, input.worker);
+  if (runner === "command") return runShellCommand(input.command, input.timeoutMs, env);
+  return runTmuxCommand(input.command, input.tmuxSession ?? defaultTmuxRunnerSession(input.worker.workerId, input.intent.blockId), input.keepTmuxSession ?? true, input.timeoutMs, env);
 }
 
-function runShellCommand(command: string, timeoutMs: number): Promise<RunnerOutcome> {
+function runShellCommand(command: string, timeoutMs: number, env: SchedulerRunnerEnvironment): Promise<RunnerOutcome> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, { shell: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, { env: { ...process.env, ...env }, shell: true, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -499,9 +522,12 @@ function runShellCommand(command: string, timeoutMs: number): Promise<RunnerOutc
   });
 }
 
-async function runTmuxCommand(command: string, session: string, keepSession: boolean, timeoutMs: number): Promise<RunnerOutcome> {
+async function runTmuxCommand(command: string, session: string, keepSession: boolean, timeoutMs: number, env: SchedulerRunnerEnvironment): Promise<RunnerOutcome> {
   const channel = `continuity-${randomUUID()}`;
-  const wrapped = `${command}\ncode=$?\nprintf '\\n__CONTINUITY_EXIT__:%s\\n' "$code"\ntmux wait-for -S ${shellQuote(channel)}`;
+  const exports = Object.entries(env)
+    .map(([key, value]) => `export ${key}=${shellQuote(value)}`)
+    .join("\n");
+  const wrapped = `${exports}\n${command}\ncode=$?\nprintf '\\n__CONTINUITY_EXIT__:%s\\n' "$code"\ntmux wait-for -S ${shellQuote(channel)}`;
   await execProgram("tmux", ["new-session", "-d", "-s", session, "sh", "-lc", wrapped]);
   await execProgram("tmux", ["wait-for", channel], timeoutMs);
   const captured = await execProgram("tmux", ["capture-pane", "-pt", session, "-S", "-"]);
@@ -609,6 +635,10 @@ function commandArtifacts(stdout: string, stderr: string): string[] | undefined 
 function appendLimited(current: string, chunk: string): string {
   const next = current + chunk;
   return next.length <= OUTPUT_LIMIT ? next : next.slice(next.length - OUTPUT_LIMIT);
+}
+
+function defaultTmuxRunnerSession(workerId: string, intentBlockId: string): string {
+  return `continuity-${workerId}-${intentBlockId.slice(4, 12)}`.replaceAll(/[^A-Za-z0-9_.-]/g, "-");
 }
 
 function shellQuote(value: string): string {

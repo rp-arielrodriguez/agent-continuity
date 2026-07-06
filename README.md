@@ -61,6 +61,9 @@ JSON-RPC on a Unix socket and can optionally serve a read-only TCP peer listener
 with `continuityd --peer-listen <host:port>`.
 `continuity dashboard --project-id <PROJECT> --task-id <TASK>` renders a
 tmux-friendly lane snapshot from the local daemon.
+`continuity scheduler-worker-loop` runs a continuous worker against the daemon
+queue; `scheduler-worker-start/status/attach/stop` manage that loop in tmux so a
+human can inspect or intervene in local Codex, Claude, and OpenCode sessions.
 `continuity daemon-install` builds or updates the local `continuityd` binary
 from the packaged Go source; `--launchd` writes a macOS launch agent plist
 without loading it implicitly.
@@ -445,6 +448,61 @@ hook is intentionally small. Its job is to inject the rule that agents call
 `continuity` for resume/checkpoint operations when the user prompt asks for that
 workflow. The CLI and database own the durability guarantees.
 
+## Scheduler Workers
+
+Submit a task intent:
+
+```bash
+continuity scheduler-task-submit \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --title "Run acceptance smoke" \
+  --instructions "Run npm run test:acceptance and report the result." \
+  --requires-agents codex \
+  --requires-model-families gpt \
+  --requires-tools shell,git
+```
+
+Run a foreground worker loop:
+
+```bash
+continuity scheduler-worker-loop \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --worker-id a0263-codex \
+  --agent codex \
+  --model-families gpt \
+  --tools shell,git \
+  --sync \
+  --runner tmux \
+  --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+```
+
+Run the same loop as an attachable tmux-managed worker:
+
+```bash
+continuity scheduler-worker-start \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --worker-id a0263-codex \
+  --agent codex \
+  --model-families gpt \
+  --tools shell,git \
+  --sync \
+  --runner tmux \
+  --command 'codex exec "$CONTINUITY_TASK_INSTRUCTIONS"'
+
+continuity scheduler-worker-status --worker-id a0263-codex
+continuity scheduler-worker-attach --worker-id a0263-codex
+continuity scheduler-worker-stop --worker-id a0263-codex
+```
+
+Runner commands receive task context through environment variables:
+`CONTINUITY_PROJECT_ID`, `CONTINUITY_TASK_ID`, `CONTINUITY_LANE_ID`,
+`CONTINUITY_INTENT_BLOCK_ID`, `CONTINUITY_TASK_TITLE`,
+`CONTINUITY_TASK_INSTRUCTIONS`, `CONTINUITY_WORKER_ID`, `CONTINUITY_AGENT`,
+`CONTINUITY_MODEL_FAMILIES`, `CONTINUITY_MODELS`, and `CONTINUITY_TOOLS`.
+
 ## Development
 
 ```bash
@@ -472,7 +530,8 @@ npm run cluster:playground -- down
 ```
 
 The playground keeps three nodes running (`orchestrator`, `worker-a`,
-`worker-b`) and has the orchestrator submit multiple tasks: exclusive routing,
-capability routing, and offline speculative competition with forked results plus
-adjudication. State is stored under `/tmp` by default and can be overridden with
+`worker-b`) and has the orchestrator submit multiple tasks. The workers execute
+bounded `scheduler-worker-loop` runs for exclusive routing, capability routing,
+and offline speculative competition with forked results plus adjudication. State
+is stored under `/tmp` by default and can be overridden with
 `CONTINUITY_CLUSTER_STATE`.

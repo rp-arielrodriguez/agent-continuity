@@ -150,26 +150,28 @@ async function demo({ fresh }) {
       modelFamilies: "gpt",
       tools: "shell,git",
     });
-    const workerA = await schedulerRun(state, "worker-a", taskId, {
+    const workerA = await schedulerWorkerLoop(state, "worker-a", taskId, {
       workerId: "worker-a-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf playground-worker-a-exclusive",
       sync: true,
+      maxRuns: 1,
     });
-    const workerB = await schedulerRun(state, "worker-b", taskId, {
+    const workerB = await schedulerWorkerLoop(state, "worker-b", taskId, {
       workerId: "worker-b-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf playground-worker-b-should-idle",
       sync: true,
+      idleLimit: 1,
     });
     await peerSync(state, "orchestrator", taskId);
     const dashboard = await schedulerDashboard(state, "orchestrator", taskId);
-    assertEqual(workerA.status, "completed", "worker-a should complete exclusive task");
-    assertEqual(workerB.status, "idle", "worker-b should idle after seeing completed exclusive result");
+    assertEqual(workerA.summary.lastResult.status, "completed", "worker-a should complete exclusive task");
+    assertEqual(workerB.summary.lastResult.status, "idle", "worker-b should idle after seeing completed exclusive result");
     assertEqual(dashboard.results.length, 1, "exclusive task should keep one result");
     createdTasks.push({ id: taskId, scenario: "exclusive" });
     printTaskSummary(taskId, dashboard);
@@ -185,26 +187,28 @@ async function demo({ fresh }) {
       modelFamilies: "anthropic",
       tools: "shell,browser",
     });
-    const codex = await schedulerRun(state, "worker-a", taskId, {
+    const codex = await schedulerWorkerLoop(state, "worker-a", taskId, {
       workerId: "worker-a-codex",
       agent: "codex",
       modelFamilies: "gpt",
       tools: "shell,git",
       command: "printf codex-should-not-run",
       sync: true,
+      idleLimit: 1,
     });
-    const opencode = await schedulerRun(state, "worker-b", taskId, {
+    const opencode = await schedulerWorkerLoop(state, "worker-b", taskId, {
       workerId: "worker-b-opencode",
       agent: "opencode",
       modelFamilies: "anthropic,gpt",
       tools: "shell,git,browser",
       command: "printf playground-worker-b-opencode",
       sync: true,
+      maxRuns: 1,
     });
     await peerSync(state, "orchestrator", taskId);
     const dashboard = await schedulerDashboard(state, "orchestrator", taskId);
-    assertEqual(codex.status, "idle", "codex worker should not match requirements");
-    assertEqual(opencode.status, "completed", "opencode worker should match requirements");
+    assertEqual(codex.summary.lastResult.status, "idle", "codex worker should not match requirements");
+    assertEqual(opencode.summary.lastResult.status, "completed", "opencode worker should match requirements");
     createdTasks.push({ id: taskId, scenario: "capability-routing" });
     printTaskSummary(taskId, dashboard);
   });
@@ -221,23 +225,25 @@ async function demo({ fresh }) {
     });
     await Promise.all([peerSync(state, "worker-a", taskId), peerSync(state, "worker-b", taskId)]);
     const [workerA, workerB] = await Promise.all([
-      schedulerRun(state, "worker-a", taskId, {
+      schedulerWorkerLoop(state, "worker-a", taskId, {
         workerId: "worker-a-codex",
         agent: "codex",
         modelFamilies: "gpt",
         tools: "shell,git",
         command: "printf playground-competition-worker-a",
+        maxRuns: 1,
       }),
-      schedulerRun(state, "worker-b", taskId, {
+      schedulerWorkerLoop(state, "worker-b", taskId, {
         workerId: "worker-b-codex",
         agent: "codex",
         modelFamilies: "gpt",
         tools: "shell,git",
         command: "printf playground-competition-worker-b",
+        maxRuns: 1,
       }),
     ]);
-    assertEqual(workerA.status, "completed", "worker-a should complete competition task");
-    assertEqual(workerB.status, "completed", "worker-b should complete competition task");
+    assertEqual(workerA.summary.lastResult.status, "completed", "worker-a should complete competition task");
+    assertEqual(workerB.summary.lastResult.status, "completed", "worker-b should complete competition task");
     await peerSync(state, "orchestrator", taskId);
     const forked = await schedulerDashboard(state, "orchestrator", taskId);
     assertEqual(forked.results.length, 2, "offline competition should have two results");
@@ -383,9 +389,9 @@ async function submitTask(state, nodeName, taskId, input) {
   ]);
 }
 
-async function schedulerRun(state, nodeName, taskId, input) {
+async function schedulerWorkerLoop(state, nodeName, taskId, input) {
   const args = [
-    "scheduler-run-once",
+    "scheduler-worker-loop",
     "--project-id",
     state.projectId,
     "--task-id",
@@ -408,9 +414,13 @@ async function schedulerRun(state, nodeName, taskId, input) {
     nodeName,
     "--actor-id",
     `${nodeName}-${input.workerId}`,
+    "--interval-ms",
+    "0",
     "--json",
   ];
   if (input.sync) args.push("--sync");
+  if (input.maxRuns !== undefined) args.push("--max-runs", String(input.maxRuns));
+  if (input.idleLimit !== undefined) args.push("--idle-limit", String(input.idleLimit));
   return jsonContinuity(state, nodeName, args);
 }
 
