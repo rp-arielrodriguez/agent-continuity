@@ -1507,7 +1507,15 @@ async function projectIdOption(parsed: ParsedArgs): Promise<string> {
 }
 
 function daemonRuntimeFromOptions(parsed: ParsedArgs, config: ContinuityConfig): DaemonRuntimeConfig {
-  const base = config.daemon ?? defaultDaemonRuntimeConfig(config.home);
+  const defaults = defaultDaemonRuntimeConfig(config.home);
+  const base = config.daemon
+    ? {
+        ...defaults,
+        ...config.daemon,
+        launchdPlistPath: config.daemon.launchdPlistPath ?? defaults.launchdPlistPath,
+        launchdLabel: config.daemon.launchdLabel ?? defaults.launchdLabel,
+      }
+    : defaults;
   return {
     ...base,
     binaryPath: stringOption(parsed, "binary") ?? base.binaryPath,
