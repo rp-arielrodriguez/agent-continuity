@@ -40,7 +40,7 @@ export async function startDaemon(options: DaemonLifecycleOptions = {}): Promise
   if (await isDaemonHealthy(runtime, options.timeoutMs)) {
     return [{ name: "continuityd", status: "running", detail: runtime.socketPath }];
   }
-  if (options.launchd) return startLaunchd(runtime);
+  if (options.launchd) return startLaunchd(runtime, options.timeoutMs);
 
   await mkdir(runtime.stateDir, { recursive: true });
   const stdoutPath = path.join(runtime.stateDir, "continuityd.out.log");
@@ -110,7 +110,7 @@ function resolveRuntime(options: DaemonLifecycleOptions): DaemonRuntimeConfig {
   return options.daemon ?? defaultDaemonRuntimeConfig(options.home);
 }
 
-async function startLaunchd(runtime: DaemonRuntimeConfig): Promise<ActionReport[]> {
+async function startLaunchd(runtime: DaemonRuntimeConfig, timeoutMs?: number): Promise<ActionReport[]> {
   const plist = requiredLaunchdPlist(runtime);
   const domain = launchdDomain();
   const actions: ActionReport[] = [];
@@ -122,6 +122,8 @@ async function startLaunchd(runtime: DaemonRuntimeConfig): Promise<ActionReport[
   }
   await execFileAsync("launchctl", ["kickstart", "-k", `${domain}/${runtime.launchdLabel ?? "com.agent-continuity.continuityd"}`]);
   actions.push({ name: "launchd-kickstart", status: "ok", detail: runtime.launchdLabel });
+  await waitForHealthOrExit(runtime.socketPath, timeoutMs ?? 5000, () => null, path.join(runtime.stateDir, "continuityd.err.log"));
+  actions.push({ name: "daemon-socket", status: "ok", detail: runtime.socketPath });
   return actions;
 }
 
