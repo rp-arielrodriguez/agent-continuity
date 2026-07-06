@@ -49,8 +49,9 @@ export async function startDaemon(options: DaemonLifecycleOptions = {}): Promise
   if (options.peerListen) args.push("--peer-listen", options.peerListen);
   const stdoutFd = await openAppend(stdoutPath);
   const stderrFd = await openAppend(stderrPath);
+  const detached = shouldDetachDaemonProcess();
   const child = spawn(runtime.binaryPath, args, {
-    detached: true,
+    detached,
     stdio: ["ignore", stdoutFd, stderrFd],
   });
   closeSync(stdoutFd);
@@ -75,6 +76,13 @@ export async function startDaemon(options: DaemonLifecycleOptions = {}): Promise
     { name: "continuityd", status: "started", detail: runtime.socketPath },
     { name: "daemon-pid", status: "updated", detail: pidPath(runtime) },
   ];
+}
+
+function shouldDetachDaemonProcess(): boolean {
+  // Detached macOS children can fail to use mDNS/VPN routes that are reachable
+  // from the same binary when launched as a normal child. `unref` still lets
+  // the CLI return while the daemon survives parent exit.
+  return process.platform !== "darwin";
 }
 
 export async function stopDaemon(options: DaemonLifecycleOptions = {}): Promise<ActionReport[]> {
