@@ -34,6 +34,7 @@
     "dist/src",
     "docs",
     "integrations/claude",
+    "install.sh",
     "AGENTS.md",
     "README.md",
     "LICENSE"

@@ -76,18 +76,33 @@ step. The database remains the source of truth; markdown is recoverable output.
 
 ## Quick Start
 
-Install the CLI:
+Bootstrap the CLI onto a clean machine:
 
 ```bash
-npm install -g agent-continuity
+curl -fsSL https://raw.githubusercontent.com/rp-arielrodriguez/agent-continuity/main/install.sh | bash
 ```
 
-Install the local runtime, integrations, and daemon:
+The bootstrap script installs the npm package under `~/.local` by default, then
+runs `continuity install`. For development checkouts and container labs, install
+from the local source instead:
+
+```bash
+./install.sh --from-source . -- --no-integrations --peer-listen :9987
+```
+
+If the CLI is already available through npm, a symlink, or a package manager,
+configure the local runtime, integrations, and daemon directly:
 
 ```bash
 continuity install
 continuity doctor
 ```
+
+`install.sh` and `continuity install` intentionally have different jobs:
+
+- `install.sh` bootstraps the `continuity` binary when it does not exist yet.
+- `continuity install` configures local runtime state, daemon, integrations, and
+  optional task migration after the binary exists.
 
 `continuity install` is idempotent. It creates/reuses a Docker-managed
 PostgreSQL container and named volume, initializes Absurd and the
