@@ -68,20 +68,36 @@ try {
     await run(["daemon-status", "--socket", paths.socket, "--db", paths.db], { env });
   });
 
+  const usableAgents = [];
   for (const agent of agents) {
     await scenario(`${agent} completes an exclusive scheduler task with real filesystem work`, async () => {
-      evidence.push(await runExclusiveAgentTask(agent, env));
+      try {
+        const result = await runExclusiveAgentTask(agent, env);
+        evidence.push(result);
+        usableAgents.push(agent);
+      } catch (error) {
+        const unavailableReason = allowMissing ? await agentUnavailableReason(agent, error, env) : undefined;
+        if (!unavailableReason) throw error;
+        const skipped = {
+          type: "exclusive",
+          agent,
+          skipped: true,
+          reason: oneLine(unavailableReason).slice(0, 500),
+        };
+        evidence.push(skipped);
+        return skipped;
+      }
     });
   }
 
-  if (agents.length > 1) {
-    await scenario(`${agents.join(", ")} compete on one speculative task and are adjudicated`, async () => {
-      evidence.push(await runSpeculativeCompetition(agents, env));
+  if (usableAgents.length > 1) {
+    await scenario(`${usableAgents.join(", ")} compete on one speculative task and are adjudicated`, async () => {
+      evidence.push(await runSpeculativeCompetition(usableAgents, env));
     });
   }
 
   console.log("\nreal-agent-acceptance: passed");
-  console.log(JSON.stringify({ runId, projectId, agents, evidence }, null, 2));
+  console.log(JSON.stringify({ runId, projectId, agents, usableAgents, evidence }, null, 2));
 } catch (error) {
   failed = true;
   throw error;
@@ -130,6 +146,22 @@ async function runExclusiveAgentTask(agent, env) {
     resultBlockId: workerOutput.summary.lastResult.resultBlock.blockId,
     proofFiles: proof.map((entry) => entry.relativeWorktreeFile),
   };
+}
+
+async function agentUnavailableReason(agent, error, env) {
+  const taskId = `real-exclusive-${agent}-${runId}`;
+  const dashboard = await schedulerDashboard(env, taskId).catch(() => undefined);
+  const artifacts = dashboard?.results?.flatMap((result) => result.payload?.artifacts ?? []) ?? [];
+  const combined = [String(error?.message ?? error), ...artifacts].join("\n");
+  return isAgentAvailabilityError(combined) ? combined : undefined;
+}
+
+function isAgentAvailabilityError(output) {
+  return /auth login|not logged in|login required|authentication|api key|remote managed settings|could not be loaded|organization requires/i.test(output);
+}
+
+function oneLine(value) {
+  return String(value).replace(/\s+/g, " ").trim();
 }
 
 async function runSpeculativeCompetition(agents, env) {
@@ -538,8 +570,10 @@ function hasOption(name) {
 
 async function scenario(name, fn) {
   process.stdout.write(`- ${name}... `);
-  await fn();
-  process.stdout.write("ok\n");
+  const result = await fn();
+  if (result?.skipped) process.stdout.write(`skipped (${result.reason})\n`);
+  else process.stdout.write("ok\n");
+  return result;
 }
 
 function assert(value, message) {

@@ -6,11 +6,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"sort"
 	"strings"
 	"time"
 )
 
 const peerRPCTimeout = 5 * time.Second
+
+var lookupPeerIPAddrs = net.DefaultResolver.LookupIPAddr
 
 type PeerSyncInput struct {
 	ProjectID string   `json:"projectId"`
@@ -40,14 +44,26 @@ type PeerSyncResult struct {
 }
 
 type PeerSyncPeer struct {
-	Endpoint   string              `json:"endpoint"`
-	Advertised int                 `json:"advertised"`
-	Missing    int                 `json:"missing"`
-	Fetched    int                 `json:"fetched"`
-	Accepted   int                 `json:"accepted"`
-	Inserted   int                 `json:"inserted"`
-	Rejected   []PeerSyncRejection `json:"rejected,omitempty"`
-	Error      string              `json:"error,omitempty"`
+	Endpoint           string                `json:"endpoint"`
+	SelectedEndpoint   string                `json:"selectedEndpoint,omitempty"`
+	CandidateEndpoints []PeerEndpointAttempt `json:"candidateEndpoints,omitempty"`
+	Skipped            bool                  `json:"skipped,omitempty"`
+	SkipReason         string                `json:"skipReason,omitempty"`
+	Advertised         int                   `json:"advertised"`
+	Missing            int                   `json:"missing"`
+	Fetched            int                   `json:"fetched"`
+	Accepted           int                   `json:"accepted"`
+	Inserted           int                   `json:"inserted"`
+	Rejected           []PeerSyncRejection   `json:"rejected,omitempty"`
+	Error              string                `json:"error,omitempty"`
+}
+
+type PeerEndpointAttempt struct {
+	Endpoint   string `json:"endpoint"`
+	Advertised int    `json:"advertised,omitempty"`
+	Missing    int    `json:"missing,omitempty"`
+	Fetched    int    `json:"fetched,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 type PeerSyncRejection struct {
@@ -83,9 +99,21 @@ type PeerTrustRemoveResult struct {
 	Removed  bool   `json:"removed"`
 }
 
+type peerSyncTarget struct {
+	Endpoint         string
+	LastGoodEndpoint string
+	NodeID           string
+	Name             string
+	SkipSelf         bool
+}
+
 func (s *Server) PeerSync(ctx context.Context, input PeerSyncInput) (PeerSyncResult, error) {
 	ref := LaneRef{ProjectID: input.ProjectID, TaskID: input.TaskID, LaneID: input.LaneID}
-	return s.peerSync(ctx, ref, input.Peers, true)
+	targets := make([]peerSyncTarget, 0, len(input.Peers))
+	for _, endpoint := range input.Peers {
+		targets = append(targets, peerSyncTarget{Endpoint: endpoint})
+	}
+	return s.peerSync(ctx, ref, targets, true)
 }
 
 func (s *Server) PeerSyncTrusted(ctx context.Context, input PeerSyncTrustedInput) (PeerSyncResult, error) {
@@ -94,11 +122,17 @@ func (s *Server) PeerSyncTrusted(ctx context.Context, input PeerSyncTrustedInput
 	if err != nil {
 		return PeerSyncResult{}, err
 	}
-	endpoints := make([]string, 0, len(peers))
+	targets := make([]peerSyncTarget, 0, len(peers))
 	for _, peer := range peers {
-		endpoints = append(endpoints, peer.Endpoint)
+		targets = append(targets, peerSyncTarget{
+			Endpoint:         peer.Endpoint,
+			LastGoodEndpoint: peer.LastGoodEndpoint,
+			NodeID:           peer.NodeID,
+			Name:             peer.Name,
+			SkipSelf:         true,
+		})
 	}
-	return s.peerSync(ctx, ref, endpoints, false)
+	return s.peerSync(ctx, ref, targets, false)
 }
 
 func (s *Server) TrustPeer(ctx context.Context, input PeerTrustAddInput) (TrustedPeer, error) {
@@ -141,11 +175,11 @@ func (s *Server) RemoveTrustedPeer(ctx context.Context, input PeerTrustRemoveInp
 	return PeerTrustRemoveResult{Endpoint: input.Endpoint, Removed: removed}, nil
 }
 
-func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, requirePeers bool) (PeerSyncResult, error) {
+func (s *Server) peerSync(ctx context.Context, ref LaneRef, targets []peerSyncTarget, requirePeers bool) (PeerSyncResult, error) {
 	if ref.ProjectID == "" || ref.TaskID == "" || ref.LaneID == "" {
 		return PeerSyncResult{}, rpcInvalidParams(errors.New("projectId, taskId, and laneId are required"))
 	}
-	if requirePeers && len(endpoints) == 0 {
+	if requirePeers && len(targets) == 0 {
 		return PeerSyncResult{}, rpcInvalidParams(errors.New("at least one peer endpoint is required"))
 	}
 
@@ -156,14 +190,29 @@ func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, 
 		Peers:     []PeerSyncPeer{},
 	}
 
-	for _, endpoint := range endpoints {
-		peerResult := PeerSyncPeer{Endpoint: endpoint}
-		blocks, advertised, missing, err := s.fetchPeerDeltaBlocks(ctx, endpoint, ref)
+	for _, target := range targets {
+		peerResult := PeerSyncPeer{Endpoint: target.Endpoint}
+		candidates := peerEndpointCandidates(ctx, target.Endpoint, target.LastGoodEndpoint)
+		if target.SkipSelf {
+			if skip, reason := isLikelySelfPeerEndpoint(target); skip {
+				peerResult.Skipped = true
+				peerResult.SkipReason = reason
+				result.Peers = append(result.Peers, peerResult)
+				continue
+			}
+		}
+
+		blocks, advertised, missing, selectedEndpoint, attempts, err := s.fetchPeerDeltaBlocksFromCandidates(ctx, candidates, ref)
+		peerResult.CandidateEndpoints = attempts
 		if err != nil {
 			peerResult.Error = err.Error()
+			if touchErr := s.store.TouchTrustedPeerFailure(ctx, target.Endpoint, peerResult.Error, ""); touchErr != nil {
+				return PeerSyncResult{}, touchErr
+			}
 			result.Peers = append(result.Peers, peerResult)
 			continue
 		}
+		peerResult.SelectedEndpoint = selectedEndpoint
 		peerResult.Advertised = advertised
 		peerResult.Missing = missing
 		peerResult.Fetched = len(blocks)
@@ -195,7 +244,7 @@ func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, 
 			result.RejectedBlocks++
 		}
 		if peerResult.Error == "" {
-			if err := s.store.TouchTrustedPeer(ctx, endpoint, ""); err != nil {
+			if err := s.store.TouchTrustedPeerSuccess(ctx, target.Endpoint, selectedEndpoint, ""); err != nil {
 				return PeerSyncResult{}, err
 			}
 		}
@@ -208,6 +257,32 @@ func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, 
 		result.FinalTip = lane.Tip
 	}
 	return result, nil
+}
+
+func (s *Server) fetchPeerDeltaBlocksFromCandidates(ctx context.Context, candidates []string, ref LaneRef) ([]TaskBlock, int, int, string, []PeerEndpointAttempt, error) {
+	attempts := make([]PeerEndpointAttempt, 0, len(candidates))
+	errorsByEndpoint := make([]string, 0, len(candidates))
+	for _, endpoint := range candidates {
+		blocks, advertised, missing, err := s.fetchPeerDeltaBlocks(ctx, endpoint, ref)
+		attempt := PeerEndpointAttempt{
+			Endpoint:   endpoint,
+			Advertised: advertised,
+			Missing:    missing,
+			Fetched:    len(blocks),
+		}
+		if err != nil {
+			attempt.Error = err.Error()
+			attempts = append(attempts, attempt)
+			errorsByEndpoint = append(errorsByEndpoint, fmt.Sprintf("%s: %v", endpoint, err))
+			continue
+		}
+		attempts = append(attempts, attempt)
+		return blocks, advertised, missing, endpoint, attempts, nil
+	}
+	if len(errorsByEndpoint) == 0 {
+		return nil, 0, 0, "", attempts, errors.New("no peer endpoint candidates")
+	}
+	return nil, 0, 0, "", attempts, fmt.Errorf("all peer endpoint candidates failed (%s)", strings.Join(errorsByEndpoint, "; "))
 }
 
 func (s *Server) fetchPeerDeltaBlocks(ctx context.Context, endpoint string, ref LaneRef) ([]TaskBlock, int, int, error) {
@@ -359,6 +434,134 @@ func peerTCPDialNetworks(address string) []string {
 		return []string{"tcp"}
 	}
 	return []string{"tcp4", "tcp6", "tcp"}
+}
+
+func peerEndpointCandidates(ctx context.Context, endpoint string, lastGoodEndpoint string) []string {
+	candidates := make([]string, 0, 4)
+	seen := map[string]bool{}
+	add := func(candidate string) {
+		if candidate == "" || seen[candidate] {
+			return
+		}
+		seen[candidate] = true
+		candidates = append(candidates, candidate)
+	}
+
+	add(lastGoodEndpoint)
+
+	network, address, err := parsePeerEndpoint(endpoint)
+	if err != nil || network != "tcp" {
+		add(endpoint)
+		return candidates
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		add(endpoint)
+		return candidates
+	}
+	host = normalizePeerHost(host)
+	if net.ParseIP(hostWithoutZone(host)) != nil {
+		add(endpoint)
+		return candidates
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
+	defer cancel()
+	addrs, err := lookupPeerIPAddrs(lookupCtx, host)
+	if err != nil {
+		add(endpoint)
+		return candidates
+	}
+	sort.SliceStable(addrs, func(i, j int) bool {
+		return peerIPRouteScore(addrs[i]) < peerIPRouteScore(addrs[j])
+	})
+	for _, addr := range addrs {
+		add("tcp://" + net.JoinHostPort(addr.String(), port))
+	}
+	add(endpoint)
+	return candidates
+}
+
+func isLikelySelfPeerEndpoint(target peerSyncTarget) (bool, string) {
+	localNames := localPeerHostNames()
+	for _, identity := range []string{target.NodeID, target.Name} {
+		if identity == "" {
+			continue
+		}
+		if localNames[strings.ToLower(strings.TrimSuffix(strings.TrimSpace(identity), "."))] {
+			return true, "peer identity matches local node"
+		}
+	}
+
+	network, address, err := parsePeerEndpoint(target.Endpoint)
+	if err != nil || network != "tcp" {
+		return false, ""
+	}
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false, ""
+	}
+	host = normalizePeerHost(host)
+	if localNames[strings.ToLower(host)] {
+		return true, "endpoint hostname matches local node"
+	}
+	return false, ""
+}
+
+func localPeerHostNames() map[string]bool {
+	names := map[string]bool{"localhost": true}
+	hostname, err := os.Hostname()
+	if err != nil {
+		return names
+	}
+	hostname = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostname)), ".")
+	if hostname == "" {
+		return names
+	}
+	names[hostname] = true
+	shortName := strings.Split(hostname, ".")[0]
+	if shortName != "" {
+		names[shortName] = true
+		names[shortName+".local"] = true
+	}
+	return names
+}
+
+func peerIPRouteScore(addr net.IPAddr) int {
+	ip := addr.IP
+	if ip == nil {
+		return 100
+	}
+	if ipv4 := ip.To4(); ipv4 != nil {
+		switch {
+		case ipv4[0] == 10:
+			return 0
+		case ipv4[0] == 172 && ipv4[1] >= 16 && ipv4[1] <= 31:
+			return 0
+		case ipv4[0] == 192 && ipv4[1] == 168:
+			return 0
+		case ipv4[0] == 100 && ipv4[1] >= 64 && ipv4[1] <= 127:
+			return 0
+		case ipv4[0] == 127:
+			return 4
+		default:
+			return 1
+		}
+	}
+	if ip.IsLinkLocalUnicast() {
+		return 3
+	}
+	return 2
+}
+
+func normalizePeerHost(host string) string {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	return strings.TrimSuffix(host, ".")
+}
+
+func hostWithoutZone(host string) string {
+	return strings.Split(host, "%")[0]
 }
 
 func parsePeerEndpoint(endpoint string) (network string, address string, err error) {

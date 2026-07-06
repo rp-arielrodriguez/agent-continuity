@@ -197,15 +197,17 @@ type HealthResult struct {
 }
 
 type TrustedPeer struct {
-	Endpoint   string `json:"endpoint"`
-	NodeID     string `json:"nodeId,omitempty"`
-	Name       string `json:"name,omitempty"`
-	PublicKey  string `json:"publicKey,omitempty"`
-	Provider   string `json:"provider,omitempty"`
-	Enabled    bool   `json:"enabled"`
-	CreatedAt  string `json:"createdAt,omitempty"`
-	UpdatedAt  string `json:"updatedAt,omitempty"`
-	LastSeenAt string `json:"lastSeenAt,omitempty"`
+	Endpoint         string `json:"endpoint"`
+	NodeID           string `json:"nodeId,omitempty"`
+	Name             string `json:"name,omitempty"`
+	PublicKey        string `json:"publicKey,omitempty"`
+	Provider         string `json:"provider,omitempty"`
+	Enabled          bool   `json:"enabled"`
+	CreatedAt        string `json:"createdAt,omitempty"`
+	UpdatedAt        string `json:"updatedAt,omitempty"`
+	LastSeenAt       string `json:"lastSeenAt,omitempty"`
+	LastGoodEndpoint string `json:"lastGoodEndpoint,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
 }
 
 func (b TaskBlock) LaneRef() LaneRef {

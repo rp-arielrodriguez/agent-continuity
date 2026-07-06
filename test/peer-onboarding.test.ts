@@ -136,6 +136,27 @@ test("mDNS TXT records carry signed peer presence", async () => {
   assert.deepEqual(decoded.projects, ["rp-arielrodriguez/agent-continuity"]);
 });
 
+test("mDNS TXT records can carry signed multi-endpoint peer presence", async () => {
+  const signer = createEd25519Signer({ nodeId: "source-node", actorId: "mdns-cli" });
+  const presence = await createPeerPresence(
+    {
+      endpoints: [
+        { endpoint: "tcp://A0263.local:9987", provider: "mdns" },
+        { endpoint: "tcp://10.44.110.206:9987", provider: "zerotier" },
+      ],
+      name: "a0263",
+      updatedAt: "2026-07-04T13:16:00.000Z",
+    },
+    signer,
+  );
+
+  const txt = mdnsTxtForPresence(presence);
+  const decoded = presenceFromMdnsTxt(txt);
+
+  assert.equal(txt.some((entry) => entry.startsWith("endpoints=")), true);
+  assert.deepEqual(decoded.endpoints, presence.endpoints);
+});
+
 test("mDNS endpoint defaults to hostname.local without a fixed IP", () => {
   assert.equal(defaultMdnsHost("A0263"), "A0263.local");
   assert.equal(defaultMdnsHost("A0263.local"), "A0263.local");

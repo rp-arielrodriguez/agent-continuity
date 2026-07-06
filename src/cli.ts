@@ -743,7 +743,14 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       else if (result.peers.length === 0) console.log("trusted peers: none");
       else {
         for (const peer of result.peers) {
-          const labels = [peer.enabled ? "enabled" : "disabled", peer.provider, peer.name, peer.nodeId].filter(Boolean).join(", ");
+          const labels = [
+            peer.enabled ? "enabled" : "disabled",
+            peer.provider,
+            peer.name,
+            peer.nodeId,
+            peer.lastGoodEndpoint ? `lastGood=${peer.lastGoodEndpoint}` : undefined,
+            peer.lastError ? `lastError=${peer.lastError}` : undefined,
+          ].filter(Boolean).join(", ");
           console.log(`${peer.endpoint}${labels ? ` (${labels})` : ""}`);
         }
       }
@@ -1067,7 +1074,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       const signer = await signerFromOptions(parsed, config, "mdns-cli");
       const presence = await createPeerPresence(
         {
-          endpoints: [{ endpoint: mdnsEndpointOption(parsed), provider: stringOption(parsed, "provider") ?? "mdns" }],
+          endpoints: publishEndpointListOption(parsed).map((endpoint) => ({ endpoint, provider: stringOption(parsed, "provider") ?? "mdns" })),
           name: stringOption(parsed, "name") ?? defaultPresenceName(),
           projects: projectListOption(parsed),
           expiresAt: stringOption(parsed, "expires-at"),
@@ -1823,14 +1830,6 @@ function publishEndpointListOption(parsed: ParsedArgs): string[] {
   throw new Error("missing required option --endpoint or --port");
 }
 
-function mdnsEndpointOption(parsed: ParsedArgs): string {
-  const endpoint = stringOption(parsed, "endpoint");
-  if (endpoint) return endpoint;
-  const port = numberOption(parsed, "port");
-  if (port === undefined) throw new Error("missing required option --endpoint or --port");
-  return defaultMdnsEndpoint(port, stringOption(parsed, "host"));
-}
-
 function nodeInitPeerListenOption(parsed: ParsedArgs): string | undefined {
   const peerListen = stringOption(parsed, "peer-listen");
   if (peerListen) return peerListen;
@@ -1929,8 +1928,14 @@ function printPeerSyncResult(result: Awaited<ReturnType<LocalDaemonProvider["syn
   console.log(`rejectedBlocks: ${result.rejectedBlocks}`);
   console.log(`finalTip: ${result.finalTip ?? "<empty>"}`);
   for (const peer of result.peers) {
-    const status = peer.error ? `error: ${peer.error}` : `${peer.inserted}/${peer.missing} inserted, ${peer.advertised} advertised`;
-    console.log(`peer: ${peer.endpoint} (${status})`);
+    const route = peer.selectedEndpoint && peer.selectedEndpoint !== peer.endpoint ? ` via ${peer.selectedEndpoint}` : "";
+    const candidateCount = peer.candidateEndpoints?.length ? `, candidates=${peer.candidateEndpoints.length}` : "";
+    const status = peer.skipped
+      ? `skipped: ${peer.skipReason ?? "unknown"}`
+      : peer.error
+        ? `error: ${peer.error}`
+        : `${peer.inserted}/${peer.missing} inserted, ${peer.advertised} advertised${candidateCount}`;
+    console.log(`peer: ${peer.endpoint}${route} (${status})`);
   }
 }
 

@@ -354,6 +354,94 @@ func TestPeerSyncTrustedPullsFromPersistedAddressBook(t *testing.T) {
 	}
 }
 
+func TestPeerSyncRoutesThroughCandidateEndpointAndRecordsLastGood(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "candidate-routing", LaneID: "main"}
+	signer := newTestSigner(t, "candidate-peer-node", "candidate-peer-agent")
+
+	remoteStore := openTestStore(t, ctx)
+	defer remoteStore.Close()
+	_, checkpoint := appendTestLane(t, ctx, remoteStore, signer, ref, "Candidate-routed checkpoint.")
+	remoteAddress, stopRemote := serveTestReadOnlyTCPPeer(t, ctx, remoteStore)
+	defer stopRemote()
+
+	_, port, err := net.SplitHostPort(remoteAddress)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedEndpoint := "tcp://candidate-peer.test:" + port
+	selectedEndpoint := "tcp://" + net.JoinHostPort("127.0.0.1", port)
+
+	originalLookup := lookupPeerIPAddrs
+	lookupPeerIPAddrs = func(context.Context, string) ([]net.IPAddr, error) {
+		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
+	}
+	t.Cleanup(func() { lookupPeerIPAddrs = originalLookup })
+
+	localStore := openTestStore(t, ctx)
+	defer localStore.Close()
+	if _, err := localStore.UpsertTrustedPeer(ctx, TrustedPeer{
+		Endpoint: trustedEndpoint,
+		Name:     "candidate-peer",
+		Enabled:  true,
+	}, "2026-07-04T11:30:00.000Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	server := NewServer(localStore)
+	syncResult, err := server.peerSync(ctx, ref, []peerSyncTarget{{Endpoint: trustedEndpoint}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syncResult.FinalTip != checkpoint.BlockID || syncResult.InsertedBlocks != 3 {
+		t.Fatalf("unexpected candidate sync result: %+v", syncResult)
+	}
+	if len(syncResult.Peers) != 1 || syncResult.Peers[0].SelectedEndpoint != selectedEndpoint {
+		t.Fatalf("unexpected selected endpoint: %+v", syncResult.Peers)
+	}
+	if len(syncResult.Peers[0].CandidateEndpoints) != 1 || syncResult.Peers[0].CandidateEndpoints[0].Endpoint != selectedEndpoint {
+		t.Fatalf("candidate endpoint attempts = %+v, want resolved candidate only", syncResult.Peers[0].CandidateEndpoints)
+	}
+	peer, found, err := localStore.TrustedPeer(ctx, trustedEndpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || peer.LastGoodEndpoint != selectedEndpoint || peer.LastError != "" {
+		t.Fatalf("trusted peer routing metadata was not updated: found=%t peer=%+v", found, peer)
+	}
+}
+
+func TestPeerSyncTrustedSkipsLikelySelfPeer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "self-peer-skip", LaneID: "main"}
+	localStore := openTestStore(t, ctx)
+	defer localStore.Close()
+	localSocket, stopLocal := serveTestServer(t, ctx, localStore)
+	defer stopLocal()
+
+	if _, err := localStore.UpsertTrustedPeer(ctx, TrustedPeer{
+		Endpoint: "tcp://localhost:9987",
+		Name:     "self",
+		Enabled:  true,
+	}, "2026-07-04T11:40:00.000Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	var syncResult PeerSyncResult
+	callTestRPC(t, localSocket, "peer.syncTrusted", PeerSyncTrustedInput{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID}, &syncResult)
+
+	if len(syncResult.Peers) != 1 || !syncResult.Peers[0].Skipped || syncResult.Peers[0].SkipReason == "" {
+		t.Fatalf("expected self peer to be skipped, got %+v", syncResult.Peers)
+	}
+	if syncResult.FetchedBlocks != 0 || syncResult.InsertedBlocks != 0 {
+		t.Fatalf("self peer skip should be a no-op sync: %+v", syncResult)
+	}
+}
+
 func TestReadOnlyTCPPeerRejectsMutatingMethods(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -117,7 +117,9 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	        enabled integer NOT NULL DEFAULT 1,
 	        created_at text NOT NULL,
 	        updated_at text NOT NULL,
-	        last_seen_at text
+	        last_seen_at text,
+	        last_good_endpoint text,
+	        last_error text
 	      );
 
 	      CREATE INDEX IF NOT EXISTS trusted_peers_enabled_idx
@@ -139,6 +141,12 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	if err := ensureColumn(ctx, s.db, "task_blocks", "archive_reason", "text"); err != nil {
 		return err
 	}
+	if err := ensureColumn(ctx, s.db, "trusted_peers", "last_good_endpoint", "text"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "trusted_peers", "last_error", "text"); err != nil {
+		return err
+	}
 	if _, err := s.db.ExecContext(ctx, `
       CREATE INDEX IF NOT EXISTS task_blocks_lane_active_sequence_idx
         ON task_blocks(project_id, task_id, lane_id, archived_at, sequence);
@@ -156,8 +164,8 @@ func (s *SQLiteStore) UpsertTrustedPeer(ctx context.Context, peer TrustedPeer, n
 	_, err := s.db.ExecContext(ctx, `
       INSERT INTO trusted_peers (
         endpoint, node_id, name, public_key, provider, enabled,
-        created_at, updated_at, last_seen_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, updated_at, last_seen_at, last_good_endpoint, last_error
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(endpoint) DO UPDATE SET
         node_id = excluded.node_id,
         name = excluded.name,
@@ -174,6 +182,8 @@ func (s *SQLiteStore) UpsertTrustedPeer(ctx context.Context, peer TrustedPeer, n
 		timestamp,
 		timestamp,
 		nullIfEmpty(peer.LastSeenAt),
+		nullIfEmpty(peer.LastGoodEndpoint),
+		nullIfEmpty(peer.LastError),
 	)
 	if err != nil {
 		return TrustedPeer{}, fmt.Errorf("upsert trusted peer %s: %w", peer.Endpoint, err)
@@ -192,7 +202,7 @@ func (s *SQLiteStore) TrustedPeer(ctx context.Context, endpoint string) (Trusted
 	var row trustedPeerRow
 	err := s.db.QueryRowContext(ctx, `
       SELECT endpoint, node_id, name, public_key, provider, enabled,
-             created_at, updated_at, last_seen_at
+             created_at, updated_at, last_seen_at, last_good_endpoint, last_error
       FROM trusted_peers
       WHERE endpoint = ?`, endpoint).Scan(
 		&row.Endpoint,
@@ -204,6 +214,8 @@ func (s *SQLiteStore) TrustedPeer(ctx context.Context, endpoint string) (Trusted
 		&row.CreatedAt,
 		&row.UpdatedAt,
 		&row.LastSeenAt,
+		&row.LastGoodEndpoint,
+		&row.LastError,
 	)
 	if err == sql.ErrNoRows {
 		return TrustedPeer{}, false, nil
@@ -217,7 +229,7 @@ func (s *SQLiteStore) TrustedPeer(ctx context.Context, endpoint string) (Trusted
 func (s *SQLiteStore) TrustedPeers(ctx context.Context, enabledOnly bool) ([]TrustedPeer, error) {
 	query := `
       SELECT endpoint, node_id, name, public_key, provider, enabled,
-             created_at, updated_at, last_seen_at
+             created_at, updated_at, last_seen_at, last_good_endpoint, last_error
       FROM trusted_peers`
 	if enabledOnly {
 		query += ` WHERE enabled = 1`
@@ -243,6 +255,8 @@ func (s *SQLiteStore) TrustedPeers(ctx context.Context, enabledOnly bool) ([]Tru
 			&row.CreatedAt,
 			&row.UpdatedAt,
 			&row.LastSeenAt,
+			&row.LastGoodEndpoint,
+			&row.LastError,
 		); err != nil {
 			return nil, fmt.Errorf("scan trusted peer: %w", err)
 		}
@@ -270,16 +284,39 @@ func (s *SQLiteStore) RemoveTrustedPeer(ctx context.Context, endpoint string) (b
 }
 
 func (s *SQLiteStore) TouchTrustedPeer(ctx context.Context, endpoint string, now string) error {
+	return s.TouchTrustedPeerSuccess(ctx, endpoint, "", now)
+}
+
+func (s *SQLiteStore) TouchTrustedPeerSuccess(ctx context.Context, endpoint string, selectedEndpoint string, now string) error {
 	if endpoint == "" {
 		return nil
 	}
 	timestamp := timestampOrNow(now)
 	_, err := s.db.ExecContext(ctx, `
       UPDATE trusted_peers
-      SET last_seen_at = ?, updated_at = ?
-      WHERE endpoint = ?`, timestamp, timestamp, endpoint)
+      SET last_seen_at = ?,
+          updated_at = ?,
+          last_good_endpoint = COALESCE(NULLIF(?, ''), last_good_endpoint),
+          last_error = NULL
+      WHERE endpoint = ?`, timestamp, timestamp, selectedEndpoint, endpoint)
 	if err != nil {
 		return fmt.Errorf("touch trusted peer %s: %w", endpoint, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) TouchTrustedPeerFailure(ctx context.Context, endpoint string, lastError string, now string) error {
+	if endpoint == "" {
+		return nil
+	}
+	timestamp := timestampOrNow(now)
+	_, err := s.db.ExecContext(ctx, `
+      UPDATE trusted_peers
+      SET updated_at = ?,
+          last_error = NULLIF(?, '')
+      WHERE endpoint = ?`, timestamp, lastError, endpoint)
+	if err != nil {
+		return fmt.Errorf("record trusted peer failure %s: %w", endpoint, err)
 	}
 	return nil
 }
@@ -1030,27 +1067,31 @@ func nullStringValue(value sql.NullString) string {
 }
 
 type trustedPeerRow struct {
-	Endpoint   string
-	NodeID     sql.NullString
-	Name       sql.NullString
-	PublicKey  sql.NullString
-	Provider   sql.NullString
-	Enabled    int
-	CreatedAt  string
-	UpdatedAt  string
-	LastSeenAt sql.NullString
+	Endpoint         string
+	NodeID           sql.NullString
+	Name             sql.NullString
+	PublicKey        sql.NullString
+	Provider         sql.NullString
+	Enabled          int
+	CreatedAt        string
+	UpdatedAt        string
+	LastSeenAt       sql.NullString
+	LastGoodEndpoint sql.NullString
+	LastError        sql.NullString
 }
 
 func (r trustedPeerRow) toPeer() TrustedPeer {
 	return TrustedPeer{
-		Endpoint:   r.Endpoint,
-		NodeID:     nullStringValue(r.NodeID),
-		Name:       nullStringValue(r.Name),
-		PublicKey:  nullStringValue(r.PublicKey),
-		Provider:   nullStringValue(r.Provider),
-		Enabled:    r.Enabled != 0,
-		CreatedAt:  r.CreatedAt,
-		UpdatedAt:  r.UpdatedAt,
-		LastSeenAt: nullStringValue(r.LastSeenAt),
+		Endpoint:         r.Endpoint,
+		NodeID:           nullStringValue(r.NodeID),
+		Name:             nullStringValue(r.Name),
+		PublicKey:        nullStringValue(r.PublicKey),
+		Provider:         nullStringValue(r.Provider),
+		Enabled:          r.Enabled != 0,
+		CreatedAt:        r.CreatedAt,
+		UpdatedAt:        r.UpdatedAt,
+		LastSeenAt:       nullStringValue(r.LastSeenAt),
+		LastGoodEndpoint: nullStringValue(r.LastGoodEndpoint),
+		LastError:        nullStringValue(r.LastError),
 	}
 }

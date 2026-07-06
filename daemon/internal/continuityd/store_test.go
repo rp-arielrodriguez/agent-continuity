@@ -633,15 +633,26 @@ func TestSQLiteStoreTrustedPeersLifecycle(t *testing.T) {
 		t.Fatalf("unexpected updated trusted peer: %+v", updated)
 	}
 
-	if err := store.TouchTrustedPeer(ctx, updated.Endpoint, "2026-07-04T10:06:00.000Z"); err != nil {
+	if err := store.TouchTrustedPeerSuccess(ctx, updated.Endpoint, "tcp://100.64.0.2:9987", "2026-07-04T10:06:00.000Z"); err != nil {
 		t.Fatal(err)
 	}
 	peers, err := store.TrustedPeers(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(peers) != 1 || peers[0].LastSeenAt != "2026-07-04T10:06:00.000Z" {
+	if len(peers) != 1 || peers[0].LastSeenAt != "2026-07-04T10:06:00.000Z" || peers[0].LastGoodEndpoint != "tcp://100.64.0.2:9987" || peers[0].LastError != "" {
 		t.Fatalf("unexpected trusted peers: %+v", peers)
+	}
+
+	if err := store.TouchTrustedPeerFailure(ctx, updated.Endpoint, "connect failed", "2026-07-04T10:07:00.000Z"); err != nil {
+		t.Fatal(err)
+	}
+	peer, found, err := store.TrustedPeer(ctx, updated.Endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || peer.LastGoodEndpoint != "tcp://100.64.0.2:9987" || peer.LastError != "connect failed" {
+		t.Fatalf("unexpected trusted peer failure metadata: found=%t peer=%+v", found, peer)
 	}
 
 	removed, err := store.RemoveTrustedPeer(ctx, updated.Endpoint)

@@ -248,6 +248,7 @@ export function mdnsTxtForPresence(presence: PeerPresence): string[] {
     `pub=${presence.publicKey}`,
     `endpoint=${endpoint.endpoint}`,
     `provider=${endpoint.provider ?? "mdns"}`,
+    ...(presence.endpoints.length > 1 ? [`endpoints=${Buffer.from(canonicalJson(presence.endpoints)).toString("base64url")}`] : []),
     `updated=${presence.updatedAt}`,
     `sig=${presence.signature.value}`,
     ...(presence.name ? [`name=${presence.name}`] : []),
@@ -259,13 +260,14 @@ export function mdnsTxtForPresence(presence: PeerPresence): string[] {
 export function presenceFromMdnsTxt(values: string[]): PeerPresence {
   const txt = parseTxtValues(values);
   const endpoint = requiredTxt(txt, "endpoint");
+  const endpoints = txt.endpoints ? parseMdnsEndpointList(txt.endpoints) : [{ endpoint, provider: txt.provider ?? "mdns" }];
   const presence: PeerPresence = {
     version: 1,
     kind: PRESENCE_KIND,
     nodeId: requiredTxt(txt, "node"),
     publicKey: requiredTxt(txt, "pub"),
     name: txt.name,
-    endpoints: [{ endpoint, provider: txt.provider ?? "mdns" }],
+    endpoints,
     projects: txt.projects ? txt.projects.split(",").map((entry) => entry.trim()).filter(Boolean) : undefined,
     updatedAt: requiredTxt(txt, "updated"),
     expiresAt: txt.expires,
@@ -555,6 +557,19 @@ function requiredTxt(values: Record<string, string>, key: string): string {
   const value = values[key];
   if (!value) throw new Error(`mDNS TXT record is missing ${key}`);
   return value;
+}
+
+function parseMdnsEndpointList(value: string): PeerEndpoint[] {
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as PeerEndpoint[];
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error("not a non-empty array");
+    return parsed.map((entry) => ({
+      endpoint: typeof entry.endpoint === "string" ? entry.endpoint : "",
+      provider: typeof entry.provider === "string" ? entry.provider : undefined,
+    }));
+  } catch (error) {
+    throw new Error(`mDNS TXT endpoints field is invalid: ${(error as Error).message}`);
+  }
 }
 
 async function runDnsSd(args: string[], timeoutMs: number): Promise<{ stdout: string; warnings: string[] }> {

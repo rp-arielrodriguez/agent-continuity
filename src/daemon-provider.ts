@@ -19,6 +19,16 @@ export type PeerSyncTrustedInput = LaneRef;
 export interface PeerSyncResult extends LaneRef {
   peers: Array<{
     endpoint: string;
+    selectedEndpoint?: string;
+    candidateEndpoints?: Array<{
+      endpoint: string;
+      advertised?: number;
+      missing?: number;
+      fetched?: number;
+      error?: string;
+    }>;
+    skipped?: boolean;
+    skipReason?: string;
     advertised: number;
     missing: number;
     fetched: number;
@@ -132,6 +142,8 @@ export interface TrustedPeer {
   createdAt?: string;
   updatedAt?: string;
   lastSeenAt?: string;
+  lastGoodEndpoint?: string;
+  lastError?: string;
 }
 
 export interface PeerTrustAddInput {
