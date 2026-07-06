@@ -3,9 +3,11 @@ package continuityd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -51,6 +53,96 @@ func TestPeerSyncPullsBlocksFromStaticUnixPeer(t *testing.T) {
 	if second.AdvertisedBlocks != 3 || second.MissingBlocks != 0 || second.FetchedBlocks != 0 || second.AcceptedBlocks != 0 || second.InsertedBlocks != 0 || second.RejectedBlocks != 0 {
 		t.Fatalf("unexpected idempotent sync result: %+v", second)
 	}
+}
+
+func TestPeerTCPDialNetworksPreferAddressFamiliesForNamedHosts(t *testing.T) {
+	tests := []struct {
+		name    string
+		address string
+		want    []string
+	}{
+		{
+			name:    "hostname",
+			address: "A0263.local:9987",
+			want:    []string{"tcp4", "tcp6", "tcp"},
+		},
+		{
+			name:    "ipv4 literal",
+			address: "10.44.110.222:9987",
+			want:    []string{"tcp"},
+		},
+		{
+			name:    "ipv6 literal",
+			address: "[fd7a:115c:a1e0::2]:9987",
+			want:    []string{"tcp"},
+		},
+		{
+			name:    "ipv6 link local literal with zone",
+			address: "[fe80::1067:719e:9d1b:a5b0%en1]:9987",
+			want:    []string{"tcp"},
+		},
+		{
+			name:    "invalid address falls back to default tcp",
+			address: "missing-port",
+			want:    []string{"tcp"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := peerTCPDialNetworks(test.address)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("peerTCPDialNetworks(%q) = %v, want %v", test.address, got, test.want)
+			}
+		})
+	}
+}
+
+func TestDialPeerAddressFallsBackAcrossNamedHostAddressFamilies(t *testing.T) {
+	dialer := &recordingPeerDialer{
+		successNetwork: "tcp6",
+	}
+	conn, err := dialPeerAddress(context.Background(), "tcp", "A0263.local:9987", dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	want := []string{"tcp4", "tcp6"}
+	if !reflect.DeepEqual(dialer.networks, want) {
+		t.Fatalf("dial attempts = %v, want %v", dialer.networks, want)
+	}
+}
+
+func TestDialPeerAddressUsesSingleDialForLiterals(t *testing.T) {
+	dialer := &recordingPeerDialer{
+		successNetwork: "tcp",
+	}
+	conn, err := dialPeerAddress(context.Background(), "tcp", "10.44.110.222:9987", dialer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	want := []string{"tcp"}
+	if !reflect.DeepEqual(dialer.networks, want) {
+		t.Fatalf("dial attempts = %v, want %v", dialer.networks, want)
+	}
+}
+
+type recordingPeerDialer struct {
+	networks       []string
+	successNetwork string
+}
+
+func (d *recordingPeerDialer) DialContext(_ context.Context, network string, _ string) (net.Conn, error) {
+	d.networks = append(d.networks, network)
+	if network != d.successNetwork {
+		return nil, errors.New("dial failed")
+	}
+	left, right := net.Pipe()
+	right.Close()
+	return left, nil
 }
 
 func TestPeerSyncFetchesOnlyMissingBlocks(t *testing.T) {

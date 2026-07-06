@@ -287,8 +287,8 @@ func callPeerJSONRPC(ctx context.Context, endpoint string, method string, params
 	if err != nil {
 		return err
 	}
-	dialer := net.Dialer{Timeout: peerRPCTimeout}
-	conn, err := dialer.DialContext(ctx, network, address)
+	dialer := &net.Dialer{Timeout: peerRPCTimeout}
+	conn, err := dialPeerAddress(ctx, network, address, dialer)
 	if err != nil {
 		return fmt.Errorf("connect peer %s: %w", endpoint, err)
 	}
@@ -323,6 +323,42 @@ func callPeerJSONRPC(ctx context.Context, endpoint string, method string, params
 		return fmt.Errorf("decode peer result: %w", err)
 	}
 	return nil
+}
+
+type peerDialer interface {
+	DialContext(ctx context.Context, network string, address string) (net.Conn, error)
+}
+
+func dialPeerAddress(ctx context.Context, network string, address string, dialer peerDialer) (net.Conn, error) {
+	if network != "tcp" {
+		return dialer.DialContext(ctx, network, address)
+	}
+
+	networks := peerTCPDialNetworks(address)
+	errorsByNetwork := make([]string, 0, len(networks))
+	for _, candidateNetwork := range networks {
+		conn, err := dialer.DialContext(ctx, candidateNetwork, address)
+		if err == nil {
+			return conn, nil
+		}
+		errorsByNetwork = append(errorsByNetwork, fmt.Sprintf("%s: %v", candidateNetwork, err))
+	}
+	return nil, fmt.Errorf("all tcp dial attempts failed for %s (%s)", address, strings.Join(errorsByNetwork, "; "))
+}
+
+func peerTCPDialNetworks(address string) []string {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return []string{"tcp"}
+	}
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	}
+	hostWithoutZone := strings.Split(host, "%")[0]
+	if net.ParseIP(hostWithoutZone) != nil {
+		return []string{"tcp"}
+	}
+	return []string{"tcp4", "tcp6", "tcp"}
 }
 
 func parsePeerEndpoint(endpoint string) (network string, address string, err error) {
