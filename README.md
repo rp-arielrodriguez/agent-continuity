@@ -459,3 +459,20 @@ npm run test:cluster
 
 Database-backed integration checks are skipped unless
 `CONTINUITY_TEST_DATABASE_URL` is set.
+
+`npm run test:cluster` is an ephemeral acceptance test: it creates containers,
+asserts behavior, and removes them. For a usable live lab, run the persistent
+cluster playground:
+
+```bash
+npm run cluster:playground -- demo --fresh
+npm run cluster:playground -- status
+npm run cluster:playground -- exec orchestrator -- continuity peer-list
+npm run cluster:playground -- down
+```
+
+The playground keeps three nodes running (`orchestrator`, `worker-a`,
+`worker-b`) and has the orchestrator submit multiple tasks: exclusive routing,
+capability routing, and offline speculative competition with forked results plus
+adjudication. State is stored under `/tmp` by default and can be overridden with
+`CONTINUITY_CLUSTER_STATE`.
