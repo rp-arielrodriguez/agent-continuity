@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { defaultCheckpointInput, loadConfig, maskDatabaseUrl } from "./config.js";
 import { loadDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import { daemonStatus, startDaemon, stopDaemon } from "./daemon-lifecycle.js";
-import { defaultDaemonRuntimeConfig, installDaemonRuntime } from "./daemon-install.js";
+import { daemonConfigFromInstallResult, defaultDaemonRuntimeConfig, installDaemonRuntime } from "./daemon-install.js";
 import { LocalDaemonProvider, type OverlayDiscoveryProvider } from "./daemon-provider.js";
 import { readDaemonCanon, runDaemonCheckpoint } from "./daemon-workflow.js";
 import { installAgentContinuity, type InstallTarget } from "./install.js";
@@ -559,6 +559,108 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       }
       return;
     }
+    case "node-init": {
+      const launchd = parsed.options.launchd === true;
+      if (launchd && process.platform !== "darwin") throw new Error("--launchd is only supported on macOS");
+
+      const peerListen = nodeInitPeerListenOption(parsed);
+      const installResult = parsed.options["no-daemon-install"] === true
+        ? undefined
+        : await installDaemonRuntime({
+            home: stringOption(parsed, "home"),
+            packageRoot: stringOption(parsed, "package-root"),
+            binaryPath: stringOption(parsed, "binary") ?? stringOption(parsed, "output"),
+            stateDir: stringOption(parsed, "state-dir"),
+            socketPath: stringOption(parsed, "socket"),
+            dbPath: stringOption(parsed, "db"),
+            launchd,
+            launchdLabel: stringOption(parsed, "launchd-label"),
+            launchdPlistPath: stringOption(parsed, "launchd-plist"),
+            peerListen,
+          });
+      const daemon = installResult ? daemonConfigFromInstallResult(installResult, stringOption(parsed, "launchd-label")) : daemonRuntimeFromOptions(parsed, config);
+      const startActions = parsed.options["no-start"] === true
+        ? []
+        : await startDaemon({
+            daemon,
+            launchd,
+            peerListen,
+            timeoutMs: numberOption(parsed, "timeout-ms"),
+          });
+      const signer = await signerFromOptions(parsed, config, "node-init-cli");
+      const name = stringOption(parsed, "name") ?? defaultPresenceName();
+      const endpoint = nodeInitEndpointOption(parsed, peerListen, name);
+      const shouldAdvertise = parsed.options["no-advertise"] !== true;
+      const filter = discoveryFilterOption(parsed);
+      const shouldDiscover = parsed.options.discover === true || discoveryFilterHasTrust(filter);
+
+      const presence = shouldAdvertise
+        ? await createPeerPresence(
+            {
+              endpoints: [{ endpoint, provider: stringOption(parsed, "provider") ?? "rendezvous" }],
+              name,
+              projects: projectListOption(parsed),
+              expiresAt: stringOption(parsed, "expires-at"),
+              updatedAt: stringOption(parsed, "now"),
+            },
+            signer.signer,
+          )
+        : undefined;
+      const publish = presence
+        ? await publishRendezvousPresenceToTarget({
+            target: rendezvousTargetOption(parsed, config),
+            presence,
+          })
+        : undefined;
+
+      let discovery: Awaited<ReturnType<typeof discoverRendezvousPeersFromTarget>> | undefined;
+      let trusted: Awaited<ReturnType<LocalDaemonProvider["trustPeer"]>>[] = [];
+      if (shouldDiscover) {
+        if (!discoveryFilterHasTrust(filter)) throw new Error("node-init --discover requires --trusted-names, --trust-names, or --trusted-node-ids");
+        const rawDiscovery = await discoverRendezvousPeersFromTarget({
+          target: rendezvousTargetOption(parsed, config),
+          filter,
+        });
+        discovery = {
+          ...rawDiscovery,
+          peers: rawDiscovery.peers.filter((peer) => peer.nodeId !== signer.signer.nodeId),
+        };
+        const provider = new LocalDaemonProvider({ socketPath: daemon.socketPath, timeoutMs: numberOption(parsed, "timeout-ms") });
+        trusted = await trustDiscoveredPeersWithProvider(provider, discovery.peers);
+      }
+
+      const output = {
+        daemon,
+        actions: [...(installResult?.actions ?? []), ...startActions],
+        keyPath: signer.keyPath,
+        keyCreated: signer.created,
+        presence,
+        publish,
+        discovery,
+        trusted,
+      };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`node: ${name}`);
+        console.log(`socket: ${daemon.socketPath}`);
+        if (peerListen) console.log(`peerListen: ${peerListen}`);
+        if (presence) console.log(`endpoint: ${endpoint}`);
+        printActions(output.actions);
+        if (publish) {
+          console.log(`rendezvous: ${publish.backend}`);
+          if (publish.file) console.log(`file: ${publish.file}`);
+          if (publish.url) console.log(`url: ${publish.url}`);
+          if (publish.worktree) console.log(`worktree: ${publish.worktree}`);
+          if (publish.branch) console.log(`branch: ${publish.branch}`);
+          if (publish.message) console.log(`message: ${publish.message}`);
+        }
+        if (discovery) {
+          printOnboardingDiscovery(`rendezvous:${discovery.backend}`, discovery.peers, discovery.warnings, trusted.length);
+          if (discovery.worktree) console.log(`worktree: ${discovery.worktree}`);
+        }
+      }
+      return;
+    }
     case "mdns-advertise": {
       const signer = await signerFromOptions(parsed, config, "mdns-cli");
       const presence = await createPeerPresence(
@@ -958,6 +1060,10 @@ function listOption(parsed: ParsedArgs, name: string): string[] {
     .filter((entry) => entry !== "");
 }
 
+function listOptions(parsed: ParsedArgs, ...names: string[]): string[] {
+  return [...new Set(names.flatMap((name) => listOption(parsed, name)))];
+}
+
 function discoveryProviders(parsed: ParsedArgs): OverlayDiscoveryProvider[] {
   const providers = listOption(parsed, "providers");
   for (const provider of providers) {
@@ -1095,6 +1201,31 @@ function mdnsEndpointOption(parsed: ParsedArgs): string {
   return defaultMdnsEndpoint(port, stringOption(parsed, "host"));
 }
 
+function nodeInitPeerListenOption(parsed: ParsedArgs): string | undefined {
+  const peerListen = stringOption(parsed, "peer-listen");
+  if (peerListen) return peerListen;
+  const port = numberOption(parsed, "port");
+  return port === undefined ? undefined : `:${port}`;
+}
+
+function nodeInitEndpointOption(parsed: ParsedArgs, peerListen: string | undefined, defaultHost: string): string {
+  const endpoint = stringOption(parsed, "endpoint");
+  if (endpoint) return endpoint;
+  const port = numberOption(parsed, "port") ?? portFromPeerListen(peerListen);
+  if (port === undefined) throw new Error("missing required option --endpoint, --port, or --peer-listen");
+  const host = stringOption(parsed, "host") ?? defaultHost;
+  return `tcp://${host}:${port}`;
+}
+
+function portFromPeerListen(peerListen: string | undefined): number | undefined {
+  if (!peerListen) return undefined;
+  const match = peerListen.match(/(?::|^)(\d+)$/);
+  if (!match) throw new Error(`cannot infer endpoint port from --peer-listen ${peerListen}`);
+  const port = Number(match[1]);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error(`invalid --peer-listen port in ${peerListen}`);
+  return port;
+}
+
 function tcpEndpointPort(endpoint: string): number {
   const url = new URL(endpoint);
   if (url.protocol !== "tcp:" || !url.port) throw new Error(`expected tcp:// endpoint, got ${endpoint}`);
@@ -1113,9 +1244,13 @@ function projectListOption(parsed: ParsedArgs): string[] | undefined {
 function discoveryFilterOption(parsed: ParsedArgs): DiscoveryFilter {
   return {
     projectId: stringOption(parsed, "project-id"),
-    trustedNames: listOption(parsed, "trusted-names"),
-    trustedNodeIds: listOption(parsed, "trusted-node-ids"),
+    trustedNames: listOptions(parsed, "trusted-names", "trust-names"),
+    trustedNodeIds: listOptions(parsed, "trusted-node-ids", "trust-node-ids"),
   };
+}
+
+function discoveryFilterHasTrust(filter: DiscoveryFilter): boolean {
+  return Boolean(filter.trustedNames?.length || filter.trustedNodeIds?.length);
 }
 
 function rendezvousTargetOption(parsed: ParsedArgs, config: ContinuityConfig): RendezvousTarget {
@@ -1140,7 +1275,15 @@ function rendezvousTargetOption(parsed: ParsedArgs, config: ContinuityConfig): R
 
 async function trustDiscoveredPeers(parsed: ParsedArgs, config: ContinuityConfig, peers: DiscoveredOnboardingPeer[]): Promise<Awaited<ReturnType<LocalDaemonProvider["trustPeer"]>>[]> {
   const provider = localDaemonProvider(parsed, config);
-  return Promise.all(peers.map((peer) => provider.trustPeer(peerTrustInputFromDiscovery(peer))));
+  return trustDiscoveredPeersWithProvider(provider, peers);
+}
+
+async function trustDiscoveredPeersWithProvider(provider: LocalDaemonProvider, peers: DiscoveredOnboardingPeer[]): Promise<Awaited<ReturnType<LocalDaemonProvider["trustPeer"]>>[]> {
+  const trusted: Awaited<ReturnType<LocalDaemonProvider["trustPeer"]>>[] = [];
+  for (const peer of peers) {
+    trusted.push(await provider.trustPeer(peerTrustInputFromDiscovery(peer)));
+  }
+  return trusted;
 }
 
 function printPeerSyncResult(result: Awaited<ReturnType<LocalDaemonProvider["syncTrustedPeers"]>>): void {
@@ -1218,6 +1361,7 @@ Commands:
   presence-discover Discover signed peers from a rendezvous directory
   rendezvous-publish Publish signed presence through file/git/s3/https rendezvous
   rendezvous-discover Discover signed peers through file/git/s3/https rendezvous
+  node-init  Install/start daemon, publish presence, discover, and trust peers
   mdns-advertise Advertise signed peer presence with local DNS-SD
   mdns-advertise-status Show mDNS advertiser status
   mdns-advertise-stop Stop mDNS advertiser
@@ -1261,6 +1405,8 @@ Examples:
   continuity rendezvous-publish --backend git --repo git@github.com:OWNER/REPO.git --branch continuity-rendezvous --dir rendezvous --port 9987
   continuity rendezvous-discover --backend s3 --url s3://bucket/continuity --trusted-names macbook --add
   continuity rendezvous-discover --backend https --url https://rendezvous.example/continuity --trusted-names macbook
+  continuity node-init --name macbook --project-id PROJECT --peer-listen :9987 --backend file --dir /shared/continuity --trust-names macbook,studio
+  continuity node-init --name worker-a --peer-listen :9987 --endpoint tcp://worker-a:9987 --backend git --repo git@github.com:OWNER/REPO.git --branch continuity-rendezvous --trust-names orchestrator,worker-a
   continuity mdns-advertise --port 9987
   continuity mdns-advertise --daemon --port 9987
   continuity mdns-advertise --port 9987 --background

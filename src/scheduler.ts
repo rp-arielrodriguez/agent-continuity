@@ -297,8 +297,8 @@ export function selectRunnableIntent(state: SchedulerState, worker: WorkerProfil
   for (const intent of candidates) {
     if (!workerMatchesIntent(worker, intent.payload)) continue;
     if (intent.results.some((result) => result.payload.workerId === worker.workerId)) continue;
-    if (intent.latestResult?.payload.status === "completed") continue;
     const policy = intent.payload.policy ?? "exclusive";
+    if (policy !== "speculative" && intent.latestResult?.payload.status === "completed") continue;
     const activeAssignments = intent.assignments.filter((assignment) => assignmentActive(assignment, now));
     if (policy === "exclusive" && activeAssignments.length > 0) continue;
     if (policy === "exclusive" && intent.results.length > 0) continue;

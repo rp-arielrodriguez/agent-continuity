@@ -285,6 +285,22 @@ continuity rendezvous-discover \
   --add
 ```
 
+`node-init` is the discovery-first bootstrap for a node. It builds/starts the
+local daemon, publishes signed presence to a rendezvous backend, discovers
+trusted peers, and adds them to the daemon address book. Re-run it with
+`--no-daemon-install --no-start --no-advertise --discover` for a pure discovery
+pass after other nodes have published their presence:
+
+```bash
+continuity node-init \
+  --name macbook \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --peer-listen :9987 \
+  --backend file \
+  --dir /shared/continuity \
+  --trust-names macbook,studio
+```
+
 ```bash
 # Local network discovery when DNS-SD is available.
 continuity mdns-advertise --port 9987 --name ariel-main
@@ -438,6 +454,7 @@ npm run build:daemon
 cd daemon && go test ./...
 npm run test:e2e
 npm run test:acceptance
+npm run test:cluster
 ```
 
 Database-backed integration checks are skipped unless

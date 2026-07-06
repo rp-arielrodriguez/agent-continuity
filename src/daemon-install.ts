@@ -58,6 +58,7 @@ export async function installDaemonRuntime(options: DaemonInstallOptions = {}): 
   actions.push({ name: "bin-dir", status: "ok", detail: path.dirname(binaryPath) });
 
   try {
+    await assertGoAvailable();
     await execFileAsync("go", ["build", "-o", binaryPath, "./cmd/continuityd"], { cwd: daemonDir });
     actions.push({ name: "build-daemon", status: "updated", detail: binaryPath });
   } catch (error) {
@@ -167,6 +168,18 @@ async function assertDaemonSource(daemonDir: string): Promise<void> {
     if (!info.isFile()) throw new Error("not a file");
   } catch (error) {
     throw new Error(`daemon source not found under ${daemonDir}: ${(error as Error).message}`);
+  }
+}
+
+async function assertGoAvailable(): Promise<void> {
+  try {
+    await execFileAsync("go", ["version"]);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new Error("required command not found: go; install Go 1.24+ or use a package with a prebuilt continuityd binary");
+    }
+    throw error;
   }
 }
 

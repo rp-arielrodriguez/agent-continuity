@@ -162,6 +162,52 @@ test("speculative intents can be assigned to another worker before a result land
   assert.equal(selected?.blockId, intent.blockId);
 });
 
+test("speculative intents can accept another worker after a completed result lands", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  await submitTaskIntent({
+    ...ref,
+    provider,
+    signer,
+    createdAt: "2026-07-05T22:15:00.000Z",
+    payload: {
+      title: "Compare completed outputs",
+      instructions: "Keep useful competing results.",
+      policy: "speculative",
+      requirements: { tools: ["shell"] },
+    },
+  });
+
+  const first = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:16:00.000Z",
+    worker: {
+      workerId: "worker-a",
+      agent: "codex",
+      tools: ["shell"],
+    },
+  });
+  assert.equal(first.status, "completed");
+
+  const second = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:17:00.000Z",
+    worker: {
+      workerId: "worker-b",
+      agent: "codex",
+      tools: ["shell"],
+    },
+  });
+  assert.equal(second.status, "completed");
+
+  const state = await loadSchedulerState(provider, ref);
+  assert.equal(state.results.length, 2);
+});
+
 test("command runner timeout is recorded as a failed result", async () => {
   const provider = new MemoryProvider();
   const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });

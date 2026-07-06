@@ -115,3 +115,40 @@ test("presence-publish can derive a signed endpoint from --port without a fixed 
     await rm(rendezvous, { recursive: true, force: true });
   }
 });
+
+test("node-init discover requires an explicit trust filter", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-home-"));
+  const rendezvous = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-rendezvous-"));
+  const env = { ...process.env, CONTINUITY_HOME: home };
+  const cli = path.join(process.cwd(), "dist/src/cli.js");
+
+  try {
+    await assert.rejects(
+      execFile(process.execPath, [
+        cli,
+        "node-init",
+        "--no-daemon-install",
+        "--no-start",
+        "--no-advertise",
+        "--discover",
+        "--endpoint",
+        "tcp://node-a:9987",
+        "--backend",
+        "file",
+        "--dir",
+        rendezvous,
+        "--node-id",
+        "node-a",
+      ], { env }),
+      (error: unknown) => {
+        const result = error as { stderr?: string; code?: number };
+        assert.equal(result.code, 1);
+        assert.match(result.stderr ?? "", /node-init --discover requires --trusted-names, --trust-names, or --trusted-node-ids/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(rendezvous, { recursive: true, force: true });
+  }
+});

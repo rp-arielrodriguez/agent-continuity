@@ -46,6 +46,7 @@
     "prepare": "npm run build",
     "test": "npm run build && node --test dist/test/*.test.js",
     "test:acceptance": "npm run build:all && node scripts/acceptance-smoke.mjs",
+    "test:cluster": "node scripts/cluster-lab.mjs",
     "test:e2e": "npm run build:all && node --test dist/test/e2e/*.test.js",
     "type-check": "tsc --noEmit -p tsconfig.json"
   },
