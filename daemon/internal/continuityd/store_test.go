@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
+	"strings"
 	"testing"
 )
 
@@ -123,6 +124,78 @@ func TestSQLiteStoreBlocksReturnsEmptySliceForEmptyLane(t *testing.T) {
 	}
 	if len(blocks) != 0 {
 		t.Fatalf("len(blocks) = %d, want 0", len(blocks))
+	}
+}
+
+func TestSQLiteStoreExternalizesAndHydratesLargeBlockPayloads(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	signer := newTestSigner(t, "macbook-ariel", "codex-session-1")
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "blob-runtime", LaneID: "main"}
+	largeCanon := "# Canon: blob-runtime\n\n" + strings.Repeat("large canonical state\n", 200)
+	bootstrap := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "bootstrap",
+		ParentTips: []string{},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-03T20:00:00.000Z",
+		Payload: map[string]any{
+			"summary":       "Start blob-backed lane.",
+			"canonMarkdown": largeCanon,
+		},
+	})
+	if result, err := store.AppendBlock(ctx, bootstrap, ""); err != nil || !result.Accepted {
+		t.Fatalf("bootstrap append failed: result=%+v err=%v", result, err)
+	}
+
+	var storedBlockJSON string
+	if err := store.db.QueryRowContext(ctx, `SELECT block_json FROM task_blocks WHERE block_id = ?`, bootstrap.BlockID).Scan(&storedBlockJSON); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(storedBlockJSON, largeCanon) {
+		t.Fatal("stored block JSON contains inline large canon")
+	}
+	if !strings.Contains(storedBlockJSON, blobRefMarker) {
+		t.Fatalf("stored block JSON does not contain blob marker: %s", storedBlockJSON)
+	}
+
+	blocks, err := store.Blocks(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(blocks) != 1 || payloadString(blocks[0].Payload, "canonMarkdown") != largeCanon {
+		t.Fatalf("hydrated block mismatch: %+v", blocks)
+	}
+	if issues := ValidateTaskBlock(blocks[0]); len(issues) != 0 {
+		t.Fatalf("hydrated block no longer validates: %+v", issues)
+	}
+	inventory, err := store.LaneInventory(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Blocks) != 1 || len(inventory.Blocks[0].BlobDigests) != 1 {
+		t.Fatalf("inventory blob refs not reported: %+v", inventory.Blocks)
+	}
+	blob, err := store.Blob(ctx, inventory.Blocks[0].BlobDigests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(blob.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != largeCanon {
+		t.Fatal("blob content did not match large canon")
 	}
 }
 

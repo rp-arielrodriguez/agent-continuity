@@ -31,9 +31,11 @@ func ValidateBlockTransition(block TaskBlock, ctx TransitionContext) TransitionR
 	if ctx.Current != nil && !sameLane(block.LaneRef(), LaneRef{ProjectID: ctx.Current.ProjectID, TaskID: ctx.Current.TaskID, LaneID: ctx.Current.LaneID}) {
 		return reject(ActionReconcile, "invalid_block", "block lane does not match transition context")
 	}
-	for _, tip := range block.ParentTips {
-		if ctx.HasBlock == nil || !ctx.HasBlock(tip) {
-			return reject(ActionReconcile, "unknown_parent_tip", "block references a parent tip that is not known locally")
+	if block.Kind != "lane_snapshot" {
+		for _, tip := range block.ParentTips {
+			if ctx.HasBlock == nil || !ctx.HasBlock(tip) {
+				return reject(ActionReconcile, "unknown_parent_tip", "block references a parent tip that is not known locally")
+			}
 		}
 	}
 
@@ -46,6 +48,8 @@ func ValidateBlockTransition(block TaskBlock, ctx TransitionContext) TransitionR
 		return validateOwnedTipBlock(block, ctx.Current, block.Kind)
 	case "inventory_update", "pause":
 		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
+	case "lane_snapshot":
+		return validateLaneSnapshot(block, ctx.Current)
 	case "reconcile":
 		return validateReconcile(block, ctx)
 	case "task_intent", "worker_profile", "task_assignment", "task_result", "task_adjudication":
@@ -119,6 +123,20 @@ func ApplyBlockToProjection(current *LaneProjection, block TaskBlock) LaneProjec
 		if value := payloadString(block.Payload, "inventoryMarkdown"); value != "" {
 			next.InventoryMarkdown = value
 		}
+	case "lane_snapshot":
+		if value := payloadString(block.Payload, "canonMarkdown"); value != "" {
+			next.CanonMarkdown = value
+		}
+		if value := payloadString(block.Payload, "inventoryMarkdown"); value != "" {
+			next.InventoryMarkdown = value
+		}
+		if checkpoint, ok := snapshotCheckpoint(block.Payload); ok {
+			next.Checkpoint = &checkpoint
+		}
+		if owner, ok := snapshotOwner(block.Payload); ok {
+			next.Owner = &owner
+		}
+		next.Heads = []string{block.BlockID}
 	}
 	return next
 }
@@ -201,6 +219,58 @@ func validateTipExtendingBlock(block TaskBlock, current *LaneProjection, kind st
 		return reject(ActionContinue, "duplicate_tip", kind+" block is already a current head")
 	}
 	return validateCurrentHeadParentTips(block, current)
+}
+
+func validateLaneSnapshot(block TaskBlock, current *LaneProjection) TransitionResult {
+	if current == nil || current.Tip == "" {
+		return accept()
+	}
+	if result := validateCurrentHeadParentTips(block, current); !result.OK {
+		return result
+	}
+	if current.Owner != nil && !sameActor(*current.Owner, ActorRef{NodeID: block.NodeID, ActorID: block.ActorID}) {
+		return reject(ActionPause, "not_lane_owner", "lane_snapshot signer is not the current lane owner")
+	}
+	if block.LeaseEpoch != current.LeaseEpoch {
+		return reject(ActionReconcile, "stale_lease_epoch", fmt.Sprintf("lane_snapshot leaseEpoch %d does not match current epoch %d", block.LeaseEpoch, current.LeaseEpoch))
+	}
+	return accept()
+}
+
+func snapshotCheckpoint(payload map[string]any) (CheckpointProjection, bool) {
+	value, ok := payload["checkpoint"].(map[string]any)
+	if !ok {
+		return CheckpointProjection{}, false
+	}
+	return CheckpointProjection{
+		Status:   payloadString(value, "status"),
+		Progress: payloadString(value, "progress"),
+		Files:    payloadString(value, "files"),
+		Blocking: payloadString(value, "blocking"),
+		Next:     payloadString(value, "next"),
+	}, true
+}
+
+func snapshotOwner(payload map[string]any) (LaneOwner, bool) {
+	value, ok := payload["owner"].(map[string]any)
+	if !ok {
+		return LaneOwner{}, false
+	}
+	leaseEpoch := int64(0)
+	switch number := value["leaseEpoch"].(type) {
+	case float64:
+		leaseEpoch = int64(number)
+	case int:
+		leaseEpoch = int64(number)
+	case int64:
+		leaseEpoch = number
+	}
+	return LaneOwner{
+		NodeID:     payloadString(value, "nodeId"),
+		ActorID:    payloadString(value, "actorId"),
+		LeaseEpoch: leaseEpoch,
+		LeaseUntil: payloadString(value, "leaseUntil"),
+	}, true
 }
 
 func validateReconcile(block TaskBlock, ctx TransitionContext) TransitionResult {

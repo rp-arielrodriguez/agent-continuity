@@ -218,7 +218,10 @@ continuity resume \
 ```
 
 `peer-add`, `peer-list`, `peer-remove`, and `peer-sync` operate on the local
-daemon address book. Signed invite, signed rendezvous presence, and mDNS are the
+daemon address book. Sync is inventory-first: a peer advertises active lane block
+IDs and the local daemon fetches only missing blocks. Human output reports
+`advertisedBlocks`, `missingBlocks`, `fetchedBlocks`, `insertedBlocks`, and
+`rejectedBlocks`. Signed invite, signed rendezvous presence, and mDNS are the
 provider-agnostic onboarding paths. `presence-publish` and `presence-discover`
 are the direct file/directory primitives:
 
@@ -235,6 +238,33 @@ continuity presence-discover \
   --trusted-node-ids <NODE_ID> \
   --add
 ```
+
+Inspect and compact lane storage when a task has accumulated long history:
+
+```bash
+continuity lane-inventory \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main
+
+continuity lane-snapshot \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main \
+  --summary "Compacted current canon and checkpoint state."
+
+continuity lane-retain \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime \
+  --lane-id main \
+  --keep-recent 20
+```
+
+Retention requires an active `lane_snapshot` by default. The daemon keeps the
+latest snapshot and its contiguous suffix active, archives older cold blocks, and
+continues serving fresh peers from the compacted snapshot. Large canon/artifact
+strings are stored as content-addressed daemon blobs and rehydrated transparently
+when blocks are read; `blob-get --digest sha256:...` is available for inspection.
 
 `rendezvous-publish` and `rendezvous-discover` wrap that signed presence model in
 first-class backends. Git stores presence files on a branch; S3 also covers

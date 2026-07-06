@@ -18,6 +18,7 @@ export type TaskBlockKind =
   | "release"
   | "pause"
   | "reconcile"
+  | "lane_snapshot"
   | "task_intent"
   | "worker_profile"
   | "task_assignment"
@@ -35,6 +36,7 @@ const TASK_BLOCK_KINDS = new Set<string>([
   "release",
   "pause",
   "reconcile",
+  "lane_snapshot",
   "task_intent",
   "worker_profile",
   "task_assignment",
@@ -87,6 +89,7 @@ export type TaskBlockPayload =
   | ReleasePayload
   | PausePayload
   | ReconcilePayload
+  | LaneSnapshotPayload
   | TaskIntentPayload
   | WorkerProfilePayload
   | TaskAssignmentPayload
@@ -153,6 +156,29 @@ export interface ReconcilePayload {
   conflictingTips: string[];
   canonMarkdown?: string;
   inventoryMarkdown?: string;
+}
+
+export interface LaneSnapshotCheckpoint {
+  status: CheckpointStatus;
+  progress: string;
+  files?: string;
+  blocking?: string;
+  next?: string;
+}
+
+export interface LaneSnapshotOwner extends ActorRef {
+  leaseEpoch: number;
+  leaseUntil?: string;
+}
+
+export interface LaneSnapshotPayload {
+  summary: string;
+  baseBlockIds: string[];
+  compactedBlockCount?: number;
+  canonMarkdown?: string;
+  inventoryMarkdown?: string;
+  checkpoint?: LaneSnapshotCheckpoint;
+  owner?: LaneSnapshotOwner;
 }
 
 export interface TaskIntentRequirements {
@@ -491,6 +517,17 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalString(payload, "canonMarkdown", issues);
       optionalString(payload, "inventoryMarkdown", issues);
       break;
+    case "lane_snapshot":
+      requireString(payload, "summary", issues);
+      if (!Array.isArray((payload as LaneSnapshotPayload).baseBlockIds) || (payload as LaneSnapshotPayload).baseBlockIds.length === 0 || (payload as LaneSnapshotPayload).baseBlockIds.some((blockId) => !isBlockId(blockId))) {
+        issues.push(issue("invalid_kind_payload", "lane_snapshot baseBlockIds must contain at least one valid block id"));
+      }
+      optionalInteger(payload, "compactedBlockCount", issues);
+      optionalString(payload, "canonMarkdown", issues);
+      optionalString(payload, "inventoryMarkdown", issues);
+      optionalSnapshotCheckpoint(payload, issues);
+      optionalSnapshotOwner(payload, issues);
+      break;
     case "task_intent":
       requireString(payload, "title", issues);
       requireString(payload, "instructions", issues);
@@ -654,6 +691,50 @@ function optionalRequirements(payload: TaskBlockPayload, issues: BlockValidation
   optionalStringArray(requirements, "modelFamilies", issues);
   optionalStringArray(requirements, "models", issues);
   optionalStringArray(requirements, "tools", issues);
+}
+
+function optionalSnapshotCheckpoint(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).checkpoint;
+  if (value === undefined) return;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    issues.push(issue("invalid_kind_payload", "checkpoint must be an object when provided"));
+    return;
+  }
+  const checkpoint = value as Record<string, unknown>;
+  if (typeof checkpoint.status !== "string" || !CHECKPOINT_STATUSES.has(checkpoint.status)) {
+    issues.push(issue("invalid_kind_payload", "checkpoint.status must be a known checkpoint status"));
+  }
+  if (typeof checkpoint.progress !== "string" || checkpoint.progress.trim() === "") {
+    issues.push(issue("invalid_kind_payload", "checkpoint.progress must be a non-empty string"));
+  }
+  for (const field of ["files", "blocking", "next"]) {
+    const entry = checkpoint[field];
+    if (entry !== undefined && typeof entry !== "string") {
+      issues.push(issue("invalid_kind_payload", `checkpoint.${field} must be a string when provided`));
+    }
+  }
+}
+
+function optionalSnapshotOwner(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).owner;
+  if (value === undefined) return;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    issues.push(issue("invalid_kind_payload", "owner must be an object when provided"));
+    return;
+  }
+  const owner = value as Record<string, unknown>;
+  if (typeof owner.nodeId !== "string" || !isIdentifier(owner.nodeId)) {
+    issues.push(issue("invalid_kind_payload", "owner.nodeId must be a non-empty continuity identifier"));
+  }
+  if (typeof owner.actorId !== "string" || !isIdentifier(owner.actorId)) {
+    issues.push(issue("invalid_kind_payload", "owner.actorId must be a non-empty continuity identifier"));
+  }
+  if (typeof owner.leaseEpoch !== "number" || !Number.isSafeInteger(owner.leaseEpoch) || owner.leaseEpoch < 0) {
+    issues.push(issue("invalid_kind_payload", "owner.leaseEpoch must be a non-negative safe integer"));
+  }
+  if (owner.leaseUntil !== undefined && (typeof owner.leaseUntil !== "string" || !isIsoDate(owner.leaseUntil))) {
+    issues.push(issue("invalid_kind_payload", "owner.leaseUntil must be an ISO timestamp when provided"));
+  }
 }
 
 function requireTimestamp(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {

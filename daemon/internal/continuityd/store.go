@@ -71,7 +71,9 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
         payload_hash text NOT NULL,
         payload_json text NOT NULL,
         signature_json text NOT NULL,
-        block_json text NOT NULL
+        block_json text NOT NULL,
+        archived_at text,
+        archive_reason text
       );
 
       CREATE INDEX IF NOT EXISTS task_blocks_lane_sequence_idx
@@ -79,6 +81,17 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 
       CREATE INDEX IF NOT EXISTS task_blocks_lane_tip_idx
         ON task_blocks(project_id, task_id, lane_id, block_id);
+
+      CREATE INDEX IF NOT EXISTS task_blocks_lane_active_sequence_idx
+        ON task_blocks(project_id, task_id, lane_id, archived_at, sequence);
+
+      CREATE TABLE IF NOT EXISTS blob_objects (
+        digest text PRIMARY KEY,
+        size_bytes integer NOT NULL,
+        content blob NOT NULL,
+        created_at text NOT NULL,
+        last_accessed_at text
+      );
 
 	      CREATE TABLE IF NOT EXISTS lane_projections (
 	        project_id text NOT NULL,
@@ -121,6 +134,12 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate sqlite store: %w", err)
 	}
 	if err := ensureColumn(ctx, s.db, "lane_projections", "heads_json", "text"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "task_blocks", "archived_at", "text"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "task_blocks", "archive_reason", "text"); err != nil {
 		return err
 	}
 	return nil
@@ -275,6 +294,7 @@ func (s *SQLiteStore) Blocks(ctx context.Context, ref LaneRef) ([]TaskBlock, err
       SELECT block_json
       FROM task_blocks
       WHERE project_id = ? AND task_id = ? AND lane_id = ?
+        AND archived_at IS NULL
       ORDER BY sequence ASC`, ref.ProjectID, ref.TaskID, ref.LaneID)
 	if err != nil {
 		return nil, fmt.Errorf("query lane blocks: %w", err)
@@ -287,7 +307,7 @@ func (s *SQLiteStore) Blocks(ctx context.Context, ref LaneRef) ([]TaskBlock, err
 		if err := rows.Scan(&blockJSON); err != nil {
 			return nil, fmt.Errorf("scan lane block: %w", err)
 		}
-		block, err := decodeBlock(blockJSON)
+		block, err := decodeStoredBlock(ctx, s.db, blockJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -297,6 +317,253 @@ func (s *SQLiteStore) Blocks(ctx context.Context, ref LaneRef) ([]TaskBlock, err
 		return nil, fmt.Errorf("iterate lane blocks: %w", err)
 	}
 	return blocks, nil
+}
+
+func (s *SQLiteStore) BlocksByID(ctx context.Context, ref LaneRef, blockIDs []string) ([]TaskBlock, error) {
+	if len(blockIDs) == 0 {
+		return []TaskBlock{}, nil
+	}
+	blocks := make([]TaskBlock, 0, len(blockIDs))
+	for _, blockID := range blockIDs {
+		var blockJSON string
+		err := s.db.QueryRowContext(ctx, `
+	      SELECT block_json
+	      FROM task_blocks
+	      WHERE project_id = ? AND task_id = ? AND lane_id = ? AND block_id = ?
+	        AND archived_at IS NULL`, ref.ProjectID, ref.TaskID, ref.LaneID, blockID).Scan(&blockJSON)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("query block %s: %w", blockID, err)
+		}
+		block, err := decodeStoredBlock(ctx, s.db, blockJSON)
+		if err != nil {
+			return nil, err
+		}
+		blocks = append(blocks, block)
+	}
+	return blocks, nil
+}
+
+func (s *SQLiteStore) LaneInventory(ctx context.Context, ref LaneRef) (LaneInventory, error) {
+	lane, found, err := s.LaneProjection(ctx, ref)
+	if err != nil {
+		return LaneInventory{}, err
+	}
+	if !found {
+		lane = EmptyLaneProjection(ref)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+      SELECT sequence, block_id, kind, parent_tips_json, payload_hash, created_at,
+             length(block_json), block_json
+      FROM task_blocks
+      WHERE project_id = ? AND task_id = ? AND lane_id = ?
+        AND archived_at IS NULL
+      ORDER BY sequence ASC`, ref.ProjectID, ref.TaskID, ref.LaneID)
+	if err != nil {
+		return LaneInventory{}, fmt.Errorf("query lane inventory: %w", err)
+	}
+	defer rows.Close()
+
+	blocks := []BlockInventoryEntry{}
+	for rows.Next() {
+		var entry BlockInventoryEntry
+		var parentTipsJSON string
+		var blockJSON string
+		if err := rows.Scan(&entry.Sequence, &entry.BlockID, &entry.Kind, &parentTipsJSON, &entry.PayloadHash, &entry.CreatedAt, &entry.SizeBytes, &blockJSON); err != nil {
+			return LaneInventory{}, fmt.Errorf("scan lane inventory: %w", err)
+		}
+		_ = json.Unmarshal([]byte(parentTipsJSON), &entry.ParentTips)
+		entry.BlobDigests = storedBlockBlobDigests(blockJSON)
+		blocks = append(blocks, entry)
+	}
+	if err := rows.Err(); err != nil {
+		return LaneInventory{}, fmt.Errorf("iterate lane inventory: %w", err)
+	}
+	archived, err := s.archivedCount(ctx, ref)
+	if err != nil {
+		return LaneInventory{}, err
+	}
+	return LaneInventory{
+		ProjectID:     ref.ProjectID,
+		TaskID:        ref.TaskID,
+		LaneID:        ref.LaneID,
+		Tip:           lane.Tip,
+		Heads:         lane.Heads,
+		BlockCount:    len(blocks),
+		ArchivedCount: archived,
+		Blocks:        blocks,
+	}, nil
+}
+
+func (s *SQLiteStore) ProjectInventory(ctx context.Context, input ProjectLaneInventoryInput) (ProjectLaneInventory, error) {
+	if input.ProjectID == "" {
+		return ProjectLaneInventory{}, fmt.Errorf("projectId is required")
+	}
+	query := `
+      SELECT p.project_id, p.task_id, p.lane_id, p.tip, p.heads_json, p.lease_epoch,
+             p.updated_at,
+             COALESCE(SUM(CASE WHEN b.archived_at IS NULL THEN 1 ELSE 0 END), 0) AS active_count,
+             COALESCE(SUM(CASE WHEN b.archived_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS archived_count
+      FROM lane_projections p
+      LEFT JOIN task_blocks b
+        ON b.project_id = p.project_id AND b.task_id = p.task_id AND b.lane_id = p.lane_id
+      WHERE p.project_id = ?`
+	args := []any{input.ProjectID}
+	if input.TaskID != "" {
+		query += ` AND p.task_id = ?`
+		args = append(args, input.TaskID)
+	}
+	if input.LaneID != "" {
+		query += ` AND p.lane_id = ?`
+		args = append(args, input.LaneID)
+	}
+	query += `
+      GROUP BY p.project_id, p.task_id, p.lane_id, p.tip, p.heads_json, p.lease_epoch, p.updated_at
+      ORDER BY p.project_id, p.task_id, p.lane_id`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return ProjectLaneInventory{}, fmt.Errorf("query project inventory: %w", err)
+	}
+	defer rows.Close()
+	lanes := []ProjectLaneInventoryEntry{}
+	for rows.Next() {
+		var row struct {
+			projectID string
+			taskID    string
+			laneID    string
+			tip       sql.NullString
+			headsJSON sql.NullString
+			epoch     int64
+			updatedAt sql.NullString
+			active    int
+			archived  int
+		}
+		if err := rows.Scan(&row.projectID, &row.taskID, &row.laneID, &row.tip, &row.headsJSON, &row.epoch, &row.updatedAt, &row.active, &row.archived); err != nil {
+			return ProjectLaneInventory{}, fmt.Errorf("scan project inventory: %w", err)
+		}
+		lanes = append(lanes, ProjectLaneInventoryEntry{
+			ProjectID:     row.projectID,
+			TaskID:        row.taskID,
+			LaneID:        row.laneID,
+			Tip:           nullStringValue(row.tip),
+			Heads:         projectionHeads(row.headsJSON, row.tip),
+			LeaseEpoch:    row.epoch,
+			BlockCount:    row.active,
+			ArchivedCount: row.archived,
+			UpdatedAt:     nullStringValue(row.updatedAt),
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return ProjectLaneInventory{}, fmt.Errorf("iterate project inventory: %w", err)
+	}
+	return ProjectLaneInventory{ProjectID: input.ProjectID, TaskID: input.TaskID, LaneID: input.LaneID, Lanes: lanes}, nil
+}
+
+func (s *SQLiteStore) ApplyRetention(ctx context.Context, input RetentionApplyInput) (RetentionApplyResult, error) {
+	ref := LaneRef{ProjectID: input.ProjectID, TaskID: input.TaskID, LaneID: input.LaneID}
+	if input.ProjectID == "" || input.TaskID == "" || input.LaneID == "" {
+		return RetentionApplyResult{}, fmt.Errorf("projectId, taskId, and laneId are required")
+	}
+	keepRecent := input.KeepRecent
+	if keepRecent <= 0 {
+		keepRecent = 1
+	}
+	requireSnapshot := !input.AllowWithoutSnapshot
+	timestamp := timestampOrNow(input.Now)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return RetentionApplyResult{}, fmt.Errorf("begin retention: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+      SELECT sequence, block_id, kind
+      FROM task_blocks
+      WHERE project_id = ? AND task_id = ? AND lane_id = ?
+        AND archived_at IS NULL
+      ORDER BY sequence ASC`, ref.ProjectID, ref.TaskID, ref.LaneID)
+	if err != nil {
+		return RetentionApplyResult{}, fmt.Errorf("query retention lane: %w", err)
+	}
+	type activeBlock struct {
+		sequence int64
+		blockID  string
+		kind     string
+	}
+	active := []activeBlock{}
+	for rows.Next() {
+		var block activeBlock
+		if err := rows.Scan(&block.sequence, &block.blockID, &block.kind); err != nil {
+			rows.Close()
+			return RetentionApplyResult{}, fmt.Errorf("scan retention lane: %w", err)
+		}
+		active = append(active, block)
+	}
+	if err := rows.Close(); err != nil {
+		return RetentionApplyResult{}, fmt.Errorf("close retention rows: %w", err)
+	}
+	if len(active) == 0 {
+		return RetentionApplyResult{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID, ActiveBlocks: 0, RequireSnapshot: requireSnapshot}, nil
+	}
+	latestSnapshot := ""
+	latestSnapshotIndex := -1
+	for i := len(active) - 1; i >= 0; i-- {
+		if active[i].kind == "lane_snapshot" {
+			latestSnapshot = active[i].blockID
+			latestSnapshotIndex = i
+			break
+		}
+	}
+	if requireSnapshot && latestSnapshot == "" {
+		return RetentionApplyResult{}, fmt.Errorf("retention requires an active lane_snapshot; pass allowWithoutSnapshot only for non-compacting archival")
+	}
+
+	protect := map[string]bool{}
+	start := len(active) - keepRecent
+	if start < 0 {
+		start = 0
+	}
+	for _, block := range active[start:] {
+		protect[block.blockID] = true
+	}
+	if latestSnapshotIndex >= 0 {
+		for _, block := range active[latestSnapshotIndex:] {
+			protect[block.blockID] = true
+		}
+	}
+	archived := 0
+	for _, block := range active {
+		if protect[block.blockID] {
+			continue
+		}
+		result, err := tx.ExecContext(ctx, `
+          UPDATE task_blocks
+          SET archived_at = ?, archive_reason = ?
+          WHERE block_id = ? AND archived_at IS NULL`, timestamp, nullIfEmpty(input.Reason), block.blockID)
+		if err != nil {
+			return RetentionApplyResult{}, fmt.Errorf("archive block %s: %w", block.blockID, err)
+		}
+		count, _ := result.RowsAffected()
+		archived += int(count)
+	}
+	if err := tx.Commit(); err != nil {
+		return RetentionApplyResult{}, fmt.Errorf("commit retention: %w", err)
+	}
+	activeCount := len(active) - archived
+	return RetentionApplyResult{
+		ProjectID:       ref.ProjectID,
+		TaskID:          ref.TaskID,
+		LaneID:          ref.LaneID,
+		ArchivedBlocks:  archived,
+		ActiveBlocks:    activeCount,
+		ArchivedAt:      timestamp,
+		LatestSnapshot:  latestSnapshot,
+		RequireSnapshot: requireSnapshot,
+	}, nil
 }
 
 func (s *SQLiteStore) AppendBlock(ctx context.Context, block TaskBlock, now string) (AppendBlockResult, error) {
@@ -352,7 +619,7 @@ func (s *SQLiteStore) AppendBlock(ctx context.Context, block TaskBlock, now stri
 	}
 
 	lane := ApplyBlockToProjection(currentPtr, block)
-	if err := insertBlock(ctx, tx, block); err != nil {
+	if err := insertBlock(ctx, tx, block, now); err != nil {
 		return AppendBlockResult{}, err
 	}
 	if err := upsertProjection(ctx, tx, lane); err != nil {
@@ -374,7 +641,7 @@ func (s *SQLiteStore) RebuildProjections(ctx context.Context) (int, error) {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM lane_projections`); err != nil {
 		return 0, fmt.Errorf("clear projections: %w", err)
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT sequence, block_json FROM task_blocks ORDER BY sequence ASC`)
+	rows, err := tx.QueryContext(ctx, `SELECT sequence, block_json FROM task_blocks WHERE archived_at IS NULL ORDER BY sequence ASC`)
 	if err != nil {
 		return 0, fmt.Errorf("query blocks for projection rebuild: %w", err)
 	}
@@ -389,7 +656,7 @@ func (s *SQLiteStore) RebuildProjections(ctx context.Context) (int, error) {
 		if err := rows.Scan(&sequence, &blockJSON); err != nil {
 			return 0, fmt.Errorf("scan block for projection rebuild: %w", err)
 		}
-		block, err := decodeBlock(blockJSON)
+		block, err := decodeStoredBlock(ctx, tx, blockJSON)
 		if err != nil {
 			return 0, err
 		}
@@ -445,6 +712,19 @@ func hasBlock(ctx context.Context, db queryer, blockID string) (bool, error) {
 	return true, nil
 }
 
+func (s *SQLiteStore) archivedCount(ctx context.Context, ref LaneRef) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `
+      SELECT COUNT(*)
+      FROM task_blocks
+      WHERE project_id = ? AND task_id = ? AND lane_id = ?
+        AND archived_at IS NOT NULL`, ref.ProjectID, ref.TaskID, ref.LaneID).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count archived blocks: %w", err)
+	}
+	return count, nil
+}
+
 func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjection, bool, error) {
 	var row projectionRow
 	err := db.QueryRowContext(ctx, `
@@ -477,12 +757,20 @@ func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjectio
 	return row.toProjection(), true, nil
 }
 
-func insertBlock(ctx context.Context, db execer, block TaskBlock) error {
+func insertBlock(ctx context.Context, db blobExecQuerier, block TaskBlock, now string) error {
 	parentTipsJSON, err := json.Marshal(block.ParentTips)
 	if err != nil {
 		return err
 	}
-	payloadJSON, err := json.Marshal(block.Payload)
+	storedPayload, err := externalizeJSONValue(ctx, db, block.Payload, now)
+	if err != nil {
+		return err
+	}
+	storedBlock := block
+	if payload, ok := storedPayload.(map[string]any); ok {
+		storedBlock.Payload = payload
+	}
+	payloadJSON, err := json.Marshal(storedPayload)
 	if err != nil {
 		return err
 	}
@@ -490,7 +778,11 @@ func insertBlock(ctx context.Context, db execer, block TaskBlock) error {
 	if err != nil {
 		return err
 	}
-	blockJSON, err := json.Marshal(block)
+	blockJSONValue, err := externalizeJSONValue(ctx, db, blockToJSONValue(storedBlock), now)
+	if err != nil {
+		return err
+	}
+	blockJSON, err := json.Marshal(blockJSONValue)
 	if err != nil {
 		return err
 	}
@@ -520,6 +812,29 @@ func insertBlock(ctx context.Context, db execer, block TaskBlock) error {
 		return fmt.Errorf("insert block %s: %w", block.BlockID, err)
 	}
 	return nil
+}
+
+func blockToJSONValue(block TaskBlock) map[string]any {
+	return map[string]any{
+		"version":     block.Version,
+		"blockId":     block.BlockID,
+		"projectId":   block.ProjectID,
+		"taskId":      block.TaskID,
+		"laneId":      block.LaneID,
+		"kind":        block.Kind,
+		"parentTips":  block.ParentTips,
+		"nodeId":      block.NodeID,
+		"actorId":     block.ActorID,
+		"leaseEpoch":  block.LeaseEpoch,
+		"createdAt":   block.CreatedAt,
+		"payloadHash": block.PayloadHash,
+		"payload":     block.Payload,
+		"signature": map[string]any{
+			"scheme":    block.Signature.Scheme,
+			"publicKey": block.Signature.PublicKey,
+			"value":     block.Signature.Value,
+		},
+	}
 }
 
 func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error {
@@ -578,14 +893,6 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
 		return fmt.Errorf("upsert lane projection: %w", err)
 	}
 	return nil
-}
-
-func decodeBlock(blockJSON string) (TaskBlock, error) {
-	var block TaskBlock
-	if err := json.Unmarshal([]byte(blockJSON), &block); err != nil {
-		return TaskBlock{}, fmt.Errorf("decode stored block: %w", err)
-	}
-	return block, nil
 }
 
 func laneKey(ref LaneRef) string {

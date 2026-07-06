@@ -196,12 +196,10 @@ func optionalPayloadStringSlice(payload map[string]any, field string) error {
 }
 
 func optionalPayloadInteger(payload map[string]any, field string) error {
-	value, ok := payload[field]
-	if !ok {
+	if _, exists := payload[field]; !exists {
 		return nil
 	}
-	number, ok := value.(float64)
-	if !ok || number != float64(int64(number)) {
+	if _, ok := payloadIntegerValue(payload, field); !ok {
 		return errors.New(field + " must be an integer when provided")
 	}
 	return nil
@@ -261,6 +259,79 @@ func optionalTaskRequirements(payload map[string]any) error {
 		}
 	}
 	return nil
+}
+
+func optionalCheckpointProjection(payload map[string]any) error {
+	value, ok := payload["checkpoint"]
+	if !ok {
+		return nil
+	}
+	checkpoint, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("checkpoint must be an object when provided")
+	}
+	if err := requiredPayloadString(checkpoint, "status"); err != nil {
+		return err
+	}
+	if !validCheckpointStatus(payloadString(checkpoint, "status")) {
+		return errors.New("checkpoint.status must be a known checkpoint status")
+	}
+	if err := requiredPayloadString(checkpoint, "progress"); err != nil {
+		return err
+	}
+	for _, field := range []string{"files", "blocking", "next"} {
+		if value, ok := checkpoint[field]; ok {
+			if _, ok := value.(string); !ok {
+				return errors.New("checkpoint." + field + " must be a string when provided")
+			}
+		}
+	}
+	return nil
+}
+
+func optionalSnapshotOwner(payload map[string]any) error {
+	value, ok := payload["owner"]
+	if !ok {
+		return nil
+	}
+	owner, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("owner must be an object when provided")
+	}
+	if err := requiredPayloadString(owner, "nodeId"); err != nil {
+		return errors.New("owner." + err.Error())
+	}
+	if err := requiredPayloadString(owner, "actorId"); err != nil {
+		return errors.New("owner." + err.Error())
+	}
+	leaseEpoch, ok := payloadIntegerValue(owner, "leaseEpoch")
+	if !ok || leaseEpoch < 0 {
+		return errors.New("owner.leaseEpoch must be a non-negative integer")
+	}
+	if err := optionalPayloadTimestamp(owner, "leaseUntil"); err != nil {
+		return errors.New("owner." + err.Error())
+	}
+	return nil
+}
+
+func payloadIntegerValue(payload map[string]any, field string) (int64, bool) {
+	value, ok := payload[field]
+	if !ok {
+		return 0, false
+	}
+	switch number := value.(type) {
+	case float64:
+		if number != float64(int64(number)) {
+			return 0, false
+		}
+		return int64(number), true
+	case int:
+		return int64(number), true
+	case int64:
+		return number, true
+	default:
+		return 0, false
+	}
 }
 
 func validatePayload(kind string, payload map[string]any) []Rejection {
@@ -323,6 +394,31 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 				issues = appendIssue(issues, "invalid_kind_payload", "conflictingTips must contain valid block ids")
 				break
 			}
+		}
+	case "lane_snapshot":
+		if err := requiredPayloadString(payload, "summary"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		values, ok := payload["baseBlockIds"].([]any)
+		if !ok || len(values) == 0 {
+			issues = appendIssue(issues, "invalid_kind_payload", "baseBlockIds must be a non-empty array")
+		} else {
+			for _, value := range values {
+				text, ok := value.(string)
+				if !ok || !validBlockID(text) {
+					issues = appendIssue(issues, "invalid_kind_payload", "baseBlockIds must contain valid block ids")
+					break
+				}
+			}
+		}
+		if err := optionalPayloadInteger(payload, "compactedBlockCount"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalCheckpointProjection(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalSnapshotOwner(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 		}
 	case "task_intent":
 		if err := requiredPayloadString(payload, "title"); err != nil {

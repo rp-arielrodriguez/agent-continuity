@@ -55,7 +55,7 @@ import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
-import type { TaskAdjudicationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
+import type { LaneSnapshotPayload, TaskAdjudicationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
 
 interface ParsedArgs {
   command: string;
@@ -573,6 +573,94 @@ Summary: ${taskId} imported ${result.imported} new journal entries
       });
       if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
       else printPeerSyncResult(result);
+      return;
+    }
+    case "lane-inventory": {
+      const provider = localDaemonProvider(parsed, config);
+      const projectId = await projectIdOption(parsed);
+      const taskId = stringOption(parsed, "task-id");
+      const laneId = stringOption(parsed, "lane-id");
+      if (taskId && laneId) {
+        const inventory = await provider.laneInventory({ projectId, taskId, laneId });
+        if (parsed.options.json) console.log(JSON.stringify(inventory, null, 2));
+        else printLaneInventory(inventory);
+        return;
+      }
+      const inventory = await provider.projectInventory({ projectId, taskId, laneId });
+      if (parsed.options.json) console.log(JSON.stringify(inventory, null, 2));
+      else printProjectInventory(inventory);
+      return;
+    }
+    case "lane-snapshot": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = {
+        projectId: await projectIdOption(parsed),
+        taskId: requiredOption(parsed, "task-id"),
+        laneId: stringOption(parsed, "lane-id") ?? "main",
+      };
+      const signer = await signerFromOptions(parsed, config, "snapshot-cli");
+      const status = await provider.status({ ...ref, actor: signer.signer, now: stringOption(parsed, "now") });
+      if (!status.lane.tip) throw new Error(`cannot snapshot empty lane ${ref.projectId}/${ref.taskId}/${ref.laneId}`);
+      if (status.action === "pause") throw new Error(status.reason ?? "lane is owned by another actor");
+      const blocks = await provider.blocks(ref);
+      if (blocks.length === 0) throw new Error(`cannot snapshot lane ${ref.projectId}/${ref.taskId}/${ref.laneId}: no active blocks`);
+      const payload: LaneSnapshotPayload = {
+        summary: stringOption(parsed, "summary") ?? `Snapshot ${ref.projectId}/${ref.taskId}/${ref.laneId}`,
+        baseBlockIds: blocks.map((block) => block.blockId),
+        compactedBlockCount: blocks.length,
+        canonMarkdown: status.lane.canonMarkdown,
+        inventoryMarkdown: status.lane.inventoryMarkdown,
+        checkpoint: status.lane.checkpoint as LaneSnapshotPayload["checkpoint"],
+        owner: status.lane.owner,
+      };
+      const result = await provider.snapshot({
+        ...ref,
+        signer: signer.signer,
+        expectedTip: status.lane.tip,
+        createdAt: stringOption(parsed, "now"),
+        payload,
+      });
+      if (parsed.options.json) console.log(JSON.stringify({ ...result, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else {
+        console.log(`snapshot: ${result.accepted ? "accepted" : "rejected"}`);
+        console.log(`project: ${ref.projectId}`);
+        console.log(`task: ${ref.taskId}`);
+        console.log(`lane: ${ref.laneId}`);
+        console.log(`baseBlocks: ${payload.baseBlockIds.length}`);
+        console.log(`block: ${result.block?.blockId ?? "<none>"}`);
+        console.log(`tip: ${result.lane.tip ?? "<empty>"}`);
+        if (result.rejection) console.log(`rejection: ${result.rejection.code}: ${result.rejection.message}`);
+      }
+      return;
+    }
+    case "lane-retain": {
+      const result = await localDaemonProvider(parsed, config).applyRetention({
+        projectId: await projectIdOption(parsed),
+        taskId: requiredOption(parsed, "task-id"),
+        laneId: stringOption(parsed, "lane-id") ?? "main",
+        keepRecent: numberOption(parsed, "keep-recent") ?? 20,
+        requireSnapshot: true,
+        allowWithoutSnapshot: parsed.options["allow-without-snapshot"] === true,
+        reason: stringOption(parsed, "reason") ?? "retention policy",
+        now: stringOption(parsed, "now"),
+      });
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        console.log(`project: ${result.projectId}`);
+        console.log(`task: ${result.taskId}`);
+        console.log(`lane: ${result.laneId}`);
+        console.log(`archivedBlocks: ${result.archivedBlocks}`);
+        console.log(`activeBlocks: ${result.activeBlocks}`);
+        console.log(`latestSnapshot: ${result.latestSnapshot ?? "<none>"}`);
+        if (result.archivedAt) console.log(`archivedAt: ${result.archivedAt}`);
+      }
+      return;
+    }
+    case "blob-get": {
+      const result = await localDaemonProvider(parsed, config).blob(requiredOption(parsed, "digest"));
+      if (parsed.options.json) console.log(JSON.stringify(result, null, 2));
+      else if (parsed.options["base64"] === true) console.log(result.contentBase64);
+      else process.stdout.write(Buffer.from(result.contentBase64, "base64").toString("utf8"));
       return;
     }
     case "peer-invite-create": {
@@ -1589,14 +1677,42 @@ function printPeerSyncResult(result: Awaited<ReturnType<LocalDaemonProvider["syn
   console.log(`task: ${result.taskId}`);
   console.log(`lane: ${result.laneId}`);
   console.log(`trustedPeers: ${result.peers.length}`);
+  console.log(`advertisedBlocks: ${result.advertisedBlocks}`);
+  console.log(`missingBlocks: ${result.missingBlocks}`);
   console.log(`fetchedBlocks: ${result.fetchedBlocks}`);
   console.log(`acceptedBlocks: ${result.acceptedBlocks}`);
   console.log(`insertedBlocks: ${result.insertedBlocks}`);
   console.log(`rejectedBlocks: ${result.rejectedBlocks}`);
   console.log(`finalTip: ${result.finalTip ?? "<empty>"}`);
   for (const peer of result.peers) {
-    const status = peer.error ? `error: ${peer.error}` : `${peer.inserted}/${peer.fetched} inserted`;
+    const status = peer.error ? `error: ${peer.error}` : `${peer.inserted}/${peer.missing} inserted, ${peer.advertised} advertised`;
     console.log(`peer: ${peer.endpoint} (${status})`);
+  }
+}
+
+function printLaneInventory(inventory: Awaited<ReturnType<LocalDaemonProvider["laneInventory"]>>): void {
+  console.log(`project: ${inventory.projectId}`);
+  console.log(`task: ${inventory.taskId}`);
+  console.log(`lane: ${inventory.laneId}`);
+  console.log(`tip: ${inventory.tip ?? "<empty>"}`);
+  console.log(`heads: ${(inventory.heads ?? []).join(",") || "<none>"}`);
+  console.log(`activeBlocks: ${inventory.blockCount}`);
+  console.log(`archivedBlocks: ${inventory.archivedCount}`);
+  for (const block of inventory.blocks) {
+    const blobs = block.blobDigests?.length ? ` blobs=${block.blobDigests.length}` : "";
+    console.log(`${block.sequence} ${block.blockId} ${block.kind} parents=${block.parentTips.length} bytes=${block.sizeBytes}${blobs}`);
+  }
+}
+
+function printProjectInventory(inventory: Awaited<ReturnType<LocalDaemonProvider["projectInventory"]>>): void {
+  console.log(`project: ${inventory.projectId}`);
+  if (inventory.taskId) console.log(`task: ${inventory.taskId}`);
+  if (inventory.laneId) console.log(`lane: ${inventory.laneId}`);
+  console.log(`lanes: ${inventory.lanes.length}`);
+  for (const lane of inventory.lanes) {
+    const heads = lane.heads?.length ? ` heads=${lane.heads.length}` : "";
+    const updated = lane.updatedAt ? ` updated=${lane.updatedAt}` : "";
+    console.log(`${lane.taskId}/${lane.laneId} active=${lane.blockCount} archived=${lane.archivedCount} epoch=${lane.leaseEpoch}${heads}${updated} tip=${lane.tip ?? "<empty>"}`);
   }
 }
 
@@ -1659,6 +1775,10 @@ Commands:
   peer-list  List trusted daemon peer endpoints
   peer-remove Remove a trusted daemon peer endpoint
   peer-sync  Sync a task/lane from trusted daemon peers
+  lane-inventory Show project/task/lane heads, active blocks, archived blocks, and blob refs
+  lane-snapshot Create a compacting snapshot block for a lane
+  lane-retain Archive cold active blocks after a snapshot
+  blob-get   Read a content-addressed daemon blob
   peer-invite-create Create a signed peer invite URL
   peer-invite-accept Trust a signed peer invite URL
   presence-publish Publish signed presence to a rendezvous directory
@@ -1726,6 +1846,10 @@ Examples:
   continuity mdns-discover --trusted-names macbook --add
   continuity peer-add --endpoint tcp://100.64.0.2:9987 --name workstation
   continuity peer-sync --project-id PROJECT --task-id TASK
+  continuity lane-inventory --project-id PROJECT --task-id TASK --lane-id main
+  continuity lane-snapshot --project-id PROJECT --task-id TASK --lane-id main --summary "Compacted replay history"
+  continuity lane-retain --project-id PROJECT --task-id TASK --lane-id main --keep-recent 20
+  continuity blob-get --digest sha256:...
   continuity daemon-install --dry-run --launchd
   continuity daemon-start
   continuity daemon-migrate --project-id PROJECT --task-id TASK`);

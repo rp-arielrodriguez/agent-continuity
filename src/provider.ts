@@ -9,6 +9,7 @@ import type {
   HeartbeatPayload,
   InventoryUpdatePayload,
   LaneRef,
+  LaneSnapshotPayload,
   ReconcilePayload,
   ReleasePayload,
   TaskBlock,
@@ -119,6 +120,13 @@ export interface ReconcileInput extends LaneRef {
   createdAt?: string;
 }
 
+export interface LaneSnapshotInput extends LaneRef {
+  signer: ContinuitySigner;
+  payload: LaneSnapshotPayload;
+  expectedTip?: string;
+  createdAt?: string;
+}
+
 export interface ContinuityProvider {
   health(): Promise<ProviderHealth>;
   status(input: LaneStatusInput): Promise<LaneStatus>;
@@ -133,6 +141,7 @@ export interface ContinuityProvider {
   handoff(input: HandoffInput): Promise<ProviderSubmitResult>;
   release(input: ReleaseLaneInput): Promise<ProviderSubmitResult>;
   reconcile(input: ReconcileInput): Promise<ProviderSubmitResult>;
+  snapshot(input: LaneSnapshotInput): Promise<ProviderSubmitResult>;
 }
 
 export abstract class BaseContinuityProvider implements ContinuityProvider {
@@ -250,6 +259,35 @@ export abstract class BaseContinuityProvider implements ContinuityProvider {
     });
   }
 
+  async snapshot(input: LaneSnapshotInput): Promise<ProviderSubmitResult> {
+    const { lane } = await this.status(input);
+    if (input.expectedTip !== undefined && input.expectedTip !== lane.tip) {
+      return {
+        accepted: false,
+        action: "reconcile",
+        lane,
+        rejection: {
+          code: "stale_parent_tip",
+          message: `expected tip ${input.expectedTip}, current tip is ${lane.tip ?? "<empty>"}`,
+        },
+      };
+    }
+    const block = await createSignedTaskBlock(
+      {
+        projectId: input.projectId,
+        taskId: input.taskId,
+        laneId: input.laneId,
+        kind: "lane_snapshot",
+        parentTips: currentHeads(lane),
+        leaseEpoch: lane.leaseEpoch,
+        createdAt: input.createdAt,
+        payload: input.payload,
+      },
+      input.signer,
+    );
+    return this.submitBlock(block);
+  }
+
   private async buildAndSubmit<TPayload extends TaskBlockPayload>(
     input: ProviderBlockInput<TPayload>,
     options: { now?: string } = {},
@@ -282,6 +320,11 @@ export abstract class BaseContinuityProvider implements ContinuityProvider {
     );
     return this.submitBlock(block, options);
   }
+}
+
+function currentHeads(lane: LaneProjection): string[] {
+  if (lane.heads?.length) return [...lane.heads];
+  return lane.tip ? [lane.tip] : [];
 }
 
 export class MemoryProvider extends BaseContinuityProvider {

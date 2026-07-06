@@ -145,6 +145,60 @@ test("memory provider rejects stale parent tips before accepting a checkpoint", 
   assert.equal(externalSubmit.rejection?.code, "stale_parent_tip");
 });
 
+test("memory provider accepts lane snapshots and resets heads", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+
+  await provider.bootstrap({
+    ...ref,
+    signer,
+    payload: {
+      summary: "Start lane.",
+      canonMarkdown: "# Canon: before snapshot\n",
+    },
+    createdAt: "2026-07-03T18:00:00.000Z",
+  });
+  await provider.claimLane({
+    ...ref,
+    signer,
+    leaseUntil: "2026-07-03T18:15:00.000Z",
+    createdAt: "2026-07-03T18:01:00.000Z",
+  });
+  const checkpoint = await provider.checkpoint({
+    ...ref,
+    signer,
+    createdAt: "2026-07-03T18:02:00.000Z",
+    payload: {
+      status: "in_progress",
+      progress: "Ready to compact.",
+    },
+  });
+  const baseBlockIds = (await provider.blocks(ref)).map((block) => block.blockId);
+
+  const snapshot = await provider.snapshot({
+    ...ref,
+    signer,
+    expectedTip: checkpoint.lane.tip,
+    createdAt: "2026-07-03T18:03:00.000Z",
+    payload: {
+      summary: "Compacted active lane.",
+      baseBlockIds,
+      compactedBlockCount: baseBlockIds.length,
+      canonMarkdown: "# Canon: after snapshot\n",
+      checkpoint: {
+        status: "in_progress",
+        progress: "Ready to compact.",
+      },
+      owner: checkpoint.lane.owner,
+    },
+  });
+
+  assert.equal(snapshot.accepted, true);
+  assert.deepEqual(snapshot.lane.heads, [snapshot.block?.blockId]);
+  assert.equal(snapshot.lane.canonMarkdown, "# Canon: after snapshot\n");
+  assert.equal(snapshot.lane.checkpoint?.progress, "Ready to compact.");
+});
+
 test("memory provider allows takeover after soft lease expiry and grace", async () => {
   const provider = new MemoryProvider();
   const owner = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });

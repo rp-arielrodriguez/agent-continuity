@@ -151,3 +151,60 @@ test("validates scheduler block payloads", async () => {
     /intentBlockId must be a valid block id/,
   );
 });
+
+test("validates lane snapshot payloads", async () => {
+  const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+  const base = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "bootstrap",
+      leaseEpoch: 0,
+      payload: {
+        summary: "Start lane before compaction.",
+      },
+    },
+    signer,
+  );
+  const snapshot = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "lane_snapshot",
+      parentTips: [base.blockId],
+      leaseEpoch: 0,
+      payload: {
+        summary: "Compacted lane history.",
+        baseBlockIds: [base.blockId],
+        compactedBlockCount: 1,
+        canonMarkdown: "# Canon: compacted\n",
+        checkpoint: {
+          status: "in_progress",
+          progress: "Snapshot carries current checkpoint projection.",
+        },
+        owner: {
+          nodeId: "macbook-ariel",
+          actorId: "codex-session-1",
+          leaseEpoch: 0,
+        },
+      },
+    },
+    signer,
+  );
+
+  assert.equal(validateTaskBlock(snapshot).ok, true);
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "lane_snapshot",
+        leaseEpoch: 0,
+        payload: {
+          summary: "Invalid snapshot.",
+          baseBlockIds: [],
+        } as never,
+      },
+      signer,
+    ),
+    /baseBlockIds must contain at least one valid block id/,
+  );
+});

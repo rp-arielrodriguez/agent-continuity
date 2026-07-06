@@ -48,8 +48,137 @@ func TestPeerSyncPullsBlocksFromStaticUnixPeer(t *testing.T) {
 
 	var second PeerSyncResult
 	callTestRPC(t, localSocket, "peer.sync", PeerSyncInput{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID, Peers: []string{"unix://" + remoteSocket}}, &second)
-	if second.FetchedBlocks != 3 || second.AcceptedBlocks != 3 || second.InsertedBlocks != 0 || second.RejectedBlocks != 0 {
+	if second.AdvertisedBlocks != 3 || second.MissingBlocks != 0 || second.FetchedBlocks != 0 || second.AcceptedBlocks != 0 || second.InsertedBlocks != 0 || second.RejectedBlocks != 0 {
 		t.Fatalf("unexpected idempotent sync result: %+v", second)
+	}
+}
+
+func TestPeerSyncFetchesOnlyMissingBlocks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "agent-continuity-decentralized-runtime", LaneID: "main"}
+	signer := newTestSigner(t, "delta-peer-node", "delta-peer-agent")
+
+	remoteStore := openTestStore(t, ctx)
+	defer remoteStore.Close()
+	_, checkpoint := appendTestLane(t, ctx, remoteStore, signer, ref, "Delta checkpoint.")
+	remoteBlocks, err := remoteStore.Blocks(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteSocket, stopRemote := serveTestServer(t, ctx, remoteStore)
+	defer stopRemote()
+
+	localStore := openTestStore(t, ctx)
+	defer localStore.Close()
+	for _, block := range remoteBlocks[:2] {
+		if result, err := localStore.AppendBlock(ctx, block, ""); err != nil || !result.Accepted {
+			t.Fatalf("seed local block failed: result=%+v err=%v", result, err)
+		}
+	}
+	localSocket, stopLocal := serveTestServer(t, ctx, localStore)
+	defer stopLocal()
+
+	var syncResult PeerSyncResult
+	callTestRPC(t, localSocket, "peer.sync", PeerSyncInput{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID, Peers: []string{"unix://" + remoteSocket}}, &syncResult)
+
+	if syncResult.AdvertisedBlocks != 3 || syncResult.MissingBlocks != 1 || syncResult.FetchedBlocks != 1 || syncResult.AcceptedBlocks != 1 || syncResult.InsertedBlocks != 1 || syncResult.RejectedBlocks != 0 {
+		t.Fatalf("unexpected delta sync result: %+v", syncResult)
+	}
+	if syncResult.FinalTip != checkpoint.BlockID {
+		t.Fatalf("final tip = %s, want %s", syncResult.FinalTip, checkpoint.BlockID)
+	}
+}
+
+func TestPeerSyncAcceptsCompactedSnapshotWithoutHistoricalParents(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "compacted-runtime", LaneID: "main"}
+	signer := newTestSigner(t, "snapshot-peer-node", "snapshot-peer-agent")
+
+	remoteStore := openTestStore(t, ctx)
+	defer remoteStore.Close()
+	appendTestLane(t, ctx, remoteStore, signer, ref, "Before snapshot.")
+	lane, found, err := remoteStore.LaneProjection(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("remote lane not found")
+	}
+	blocks, err := remoteStore.Blocks(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseBlockIDs := make([]any, 0, len(blocks))
+	for _, block := range blocks {
+		baseBlockIDs = append(baseBlockIDs, block.BlockID)
+	}
+	snapshot := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "lane_snapshot",
+		ParentTips: []string{lane.Tip},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: lane.LeaseEpoch,
+		CreatedAt:  "2026-07-03T22:03:00.000Z",
+		Payload: map[string]any{
+			"summary":             "Compacted lane history.",
+			"baseBlockIds":        baseBlockIDs,
+			"compactedBlockCount": len(blocks),
+			"checkpoint": map[string]any{
+				"status":   "in_progress",
+				"progress": "Before snapshot.",
+			},
+			"owner": map[string]any{
+				"nodeId":     signer.nodeID,
+				"actorId":    signer.actorID,
+				"leaseEpoch": lane.LeaseEpoch,
+				"leaseUntil": lane.Owner.LeaseUntil,
+			},
+		},
+	})
+	if result, err := remoteStore.AppendBlock(ctx, snapshot, ""); err != nil || !result.Accepted {
+		t.Fatalf("snapshot append failed: result=%+v err=%v", result, err)
+	}
+	retention, err := remoteStore.ApplyRetention(ctx, RetentionApplyInput{
+		ProjectID:       ref.ProjectID,
+		TaskID:          ref.TaskID,
+		LaneID:          ref.LaneID,
+		KeepRecent:      1,
+		RequireSnapshot: true,
+		Reason:          "test compaction",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.ArchivedBlocks != 3 || retention.ActiveBlocks != 1 || retention.LatestSnapshot != snapshot.BlockID {
+		t.Fatalf("unexpected retention result: %+v", retention)
+	}
+	if replayed, err := remoteStore.RebuildProjections(ctx); err != nil || replayed != 1 {
+		t.Fatalf("rebuild after retention replayed=%d err=%v", replayed, err)
+	}
+
+	remoteSocket, stopRemote := serveTestServer(t, ctx, remoteStore)
+	defer stopRemote()
+	localStore := openTestStore(t, ctx)
+	defer localStore.Close()
+	localSocket, stopLocal := serveTestServer(t, ctx, localStore)
+	defer stopLocal()
+
+	var syncResult PeerSyncResult
+	callTestRPC(t, localSocket, "peer.sync", PeerSyncInput{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID, Peers: []string{"unix://" + remoteSocket}}, &syncResult)
+
+	if syncResult.AdvertisedBlocks != 1 || syncResult.MissingBlocks != 1 || syncResult.FetchedBlocks != 1 || syncResult.InsertedBlocks != 1 || syncResult.RejectedBlocks != 0 {
+		t.Fatalf("unexpected compacted sync result: %+v", syncResult)
+	}
+	if syncResult.FinalTip != snapshot.BlockID {
+		t.Fatalf("final tip = %s, want snapshot %s", syncResult.FinalTip, snapshot.BlockID)
 	}
 }
 

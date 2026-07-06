@@ -339,6 +339,9 @@ try {
       "--json",
     ], { env });
     const syncResult = JSON.parse(sync.stdout);
+    assertAtLeast(syncResult.advertisedBlocks, 3, "expected source to advertise remote blocks");
+    assertAtLeast(syncResult.missingBlocks, 3, "expected initial sync to identify missing remote blocks");
+    assertAtLeast(syncResult.fetchedBlocks, 3, "expected initial sync to fetch missing remote blocks");
     assertAtLeast(syncResult.insertedBlocks, 3, "expected initial sync to insert remote blocks");
     assertEqual(syncResult.rejectedBlocks, 0, "expected no rejected blocks on initial sync");
 
@@ -367,6 +370,9 @@ try {
       "--json",
     ], { env });
     const repeatResult = JSON.parse(repeat.stdout);
+    assertAtLeast(repeatResult.advertisedBlocks, 3, "expected repeat sync to still read peer inventory");
+    assertEqual(repeatResult.missingBlocks, 0, "expected repeat sync to have no missing blocks");
+    assertEqual(repeatResult.fetchedBlocks, 0, "expected repeat sync to fetch no blocks");
     assertEqual(repeatResult.insertedBlocks, 0, "expected repeat sync to be idempotent");
     assertEqual(repeatResult.rejectedBlocks, 0, "expected no rejected blocks on repeat sync");
   });

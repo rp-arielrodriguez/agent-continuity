@@ -19,6 +19,8 @@ export type PeerSyncTrustedInput = LaneRef;
 export interface PeerSyncResult extends LaneRef {
   peers: Array<{
     endpoint: string;
+    advertised: number;
+    missing: number;
     fetched: number;
     accepted: number;
     inserted: number;
@@ -29,11 +31,73 @@ export interface PeerSyncResult extends LaneRef {
     }>;
     error?: string;
   }>;
+  advertisedBlocks: number;
+  missingBlocks: number;
   fetchedBlocks: number;
   acceptedBlocks: number;
   insertedBlocks: number;
   rejectedBlocks: number;
   finalTip?: string;
+}
+
+export interface BlockInventoryEntry {
+  sequence: number;
+  blockId: string;
+  kind: string;
+  parentTips: string[];
+  payloadHash: string;
+  createdAt: string;
+  sizeBytes: number;
+  blobDigests?: string[];
+}
+
+export interface LaneInventory extends LaneRef {
+  tip?: string;
+  heads?: string[];
+  blockCount: number;
+  archivedCount: number;
+  blocks: BlockInventoryEntry[];
+}
+
+export interface ProjectLaneInventoryInput {
+  projectId: string;
+  taskId?: string;
+  laneId?: string;
+}
+
+export interface ProjectLaneInventoryEntry extends LaneRef {
+  tip?: string;
+  heads?: string[];
+  leaseEpoch: number;
+  blockCount: number;
+  archivedCount: number;
+  updatedAt?: string;
+}
+
+export interface ProjectLaneInventory extends ProjectLaneInventoryInput {
+  lanes: ProjectLaneInventoryEntry[];
+}
+
+export interface RetentionApplyInput extends LaneRef {
+  keepRecent?: number;
+  requireSnapshot?: boolean;
+  allowWithoutSnapshot?: boolean;
+  reason?: string;
+  now?: string;
+}
+
+export interface RetentionApplyResult extends LaneRef {
+  archivedBlocks: number;
+  activeBlocks: number;
+  archivedAt?: string;
+  latestSnapshot?: string;
+  requireSnapshot: boolean;
+}
+
+export interface BlobGetResult {
+  digest: string;
+  sizeBytes: number;
+  contentBase64: string;
 }
 
 export type OverlayDiscoveryProvider = "tailscale" | "zerotier";
@@ -159,6 +223,22 @@ export class LocalDaemonProvider extends BaseContinuityProvider {
 
   async blocks(ref: LaneRef): Promise<TaskBlock[]> {
     return (await this.client.call<TaskBlock[] | null>("lane.blocks", ref)) ?? [];
+  }
+
+  async laneInventory(ref: LaneRef): Promise<LaneInventory> {
+    return this.client.call<LaneInventory>("lane.inventory", ref);
+  }
+
+  async projectInventory(input: ProjectLaneInventoryInput): Promise<ProjectLaneInventory> {
+    return this.client.call<ProjectLaneInventory>("project.inventory", input);
+  }
+
+  async applyRetention(input: RetentionApplyInput): Promise<RetentionApplyResult> {
+    return this.client.call<RetentionApplyResult>("retention.apply", input);
+  }
+
+  async blob(digest: string): Promise<BlobGetResult> {
+    return this.client.call<BlobGetResult>("blob.get", { digest });
   }
 
   async submitBlock(block: TaskBlock, options?: { now?: string }): Promise<ProviderSubmitResult> {

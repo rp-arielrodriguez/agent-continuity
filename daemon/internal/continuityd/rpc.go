@@ -100,7 +100,7 @@ func (s *Server) handleRequest(ctx context.Context, request rpcRequest, readOnly
 
 func isReadOnlyMethod(method string) bool {
 	switch method {
-	case "daemon.health", "provider.health", "lane.status", "lane.blocks":
+	case "daemon.health", "provider.health", "lane.status", "lane.blocks", "lane.blocks.get", "lane.inventory", "project.inventory", "blob.get":
 		return true
 	default:
 		return false
@@ -123,12 +123,42 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, rpcInvalidParams(err)
 		}
 		return s.store.Blocks(ctx, input)
+	case "lane.blocks.get":
+		var input LaneBlocksGetInput
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		return s.store.BlocksByID(ctx, LaneRef{ProjectID: input.ProjectID, TaskID: input.TaskID, LaneID: input.LaneID}, input.BlockIDs)
+	case "lane.inventory":
+		var input LaneRef
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		return s.store.LaneInventory(ctx, input)
+	case "project.inventory":
+		var input ProjectLaneInventoryInput
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		return s.store.ProjectInventory(ctx, input)
+	case "blob.get":
+		var input BlobGetInput
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		return s.store.Blob(ctx, input.Digest)
 	case "block.submit":
 		var input submitBlockInput
 		if err := decodeParams(params, &input); err != nil {
 			return nil, rpcInvalidParams(err)
 		}
 		return s.store.AppendBlock(ctx, input.Block, input.Now)
+	case "retention.apply":
+		var input RetentionApplyInput
+		if err := decodeParams(params, &input); err != nil {
+			return nil, rpcInvalidParams(err)
+		}
+		return s.store.ApplyRetention(ctx, input)
 	case "projection.rebuild":
 		count, err := s.store.RebuildProjections(ctx)
 		if err != nil {

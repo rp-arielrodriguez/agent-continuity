@@ -136,6 +136,7 @@ target node
   continuity mdns-discover --trusted-names <name> --add
   continuity rendezvous-discover --backend git ... --trusted-names <name> --add
   continuity peer-sync --project-id <project> --task-id <task>
+  continuity peer-sync --project-id <project> --task-id <task> --json
   continuity resume --daemon --sync --project-id <project> --task-id <task>
 ```
 
@@ -143,16 +144,20 @@ The accepted proof is:
 
 - both discovery paths produce the same logical peer
 - trusted peer list contains that peer
-- sync reports zero rejected blocks
+- initial sync reports zero rejected blocks and inserts advertised missing blocks
+- repeat sync reports advertised blocks but zero missing/fetched/inserted blocks
 - resume prints the expected canon
+- `lane-snapshot` followed by `lane-retain` leaves a compacted active snapshot
+- a fresh daemon can sync and resume from that compacted snapshot without the old
+  archived parent blocks
 - local test matrix passes on the target machine
 
 ## Gaps To Close Next
 
 - Add unit coverage for expired presence rejection.
 - Add a local-e2e restart persistence scenario.
-- Add duplicate discovery, key-pinning, disabled-peer, partial-sync, and lane
-  isolation acceptance cases.
+- Add duplicate discovery, key-pinning, disabled-peer, and lane isolation
+  acceptance cases.
 - Add physical cross-machine worker-loop acceptance with both nodes already
   running workers.
 - Add persisted worker profiles/config files for multiple named workers.

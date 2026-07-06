@@ -26,24 +26,28 @@ type PeerSyncTrustedInput struct {
 }
 
 type PeerSyncResult struct {
-	ProjectID      string         `json:"projectId"`
-	TaskID         string         `json:"taskId"`
-	LaneID         string         `json:"laneId"`
-	Peers          []PeerSyncPeer `json:"peers"`
-	FetchedBlocks  int            `json:"fetchedBlocks"`
-	AcceptedBlocks int            `json:"acceptedBlocks"`
-	InsertedBlocks int            `json:"insertedBlocks"`
-	RejectedBlocks int            `json:"rejectedBlocks"`
-	FinalTip       string         `json:"finalTip,omitempty"`
+	ProjectID        string         `json:"projectId"`
+	TaskID           string         `json:"taskId"`
+	LaneID           string         `json:"laneId"`
+	Peers            []PeerSyncPeer `json:"peers"`
+	AdvertisedBlocks int            `json:"advertisedBlocks"`
+	MissingBlocks    int            `json:"missingBlocks"`
+	FetchedBlocks    int            `json:"fetchedBlocks"`
+	AcceptedBlocks   int            `json:"acceptedBlocks"`
+	InsertedBlocks   int            `json:"insertedBlocks"`
+	RejectedBlocks   int            `json:"rejectedBlocks"`
+	FinalTip         string         `json:"finalTip,omitempty"`
 }
 
 type PeerSyncPeer struct {
-	Endpoint string              `json:"endpoint"`
-	Fetched  int                 `json:"fetched"`
-	Accepted int                 `json:"accepted"`
-	Inserted int                 `json:"inserted"`
-	Rejected []PeerSyncRejection `json:"rejected,omitempty"`
-	Error    string              `json:"error,omitempty"`
+	Endpoint   string              `json:"endpoint"`
+	Advertised int                 `json:"advertised"`
+	Missing    int                 `json:"missing"`
+	Fetched    int                 `json:"fetched"`
+	Accepted   int                 `json:"accepted"`
+	Inserted   int                 `json:"inserted"`
+	Rejected   []PeerSyncRejection `json:"rejected,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 type PeerSyncRejection struct {
@@ -154,13 +158,17 @@ func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, 
 
 	for _, endpoint := range endpoints {
 		peerResult := PeerSyncPeer{Endpoint: endpoint}
-		blocks, err := fetchPeerBlocks(ctx, endpoint, ref)
+		blocks, advertised, missing, err := s.fetchPeerDeltaBlocks(ctx, endpoint, ref)
 		if err != nil {
 			peerResult.Error = err.Error()
 			result.Peers = append(result.Peers, peerResult)
 			continue
 		}
+		peerResult.Advertised = advertised
+		peerResult.Missing = missing
 		peerResult.Fetched = len(blocks)
+		result.AdvertisedBlocks += advertised
+		result.MissingBlocks += missing
 		result.FetchedBlocks += len(blocks)
 
 		for _, block := range blocks {
@@ -200,6 +208,70 @@ func (s *Server) peerSync(ctx context.Context, ref LaneRef, endpoints []string, 
 		result.FinalTip = lane.Tip
 	}
 	return result, nil
+}
+
+func (s *Server) fetchPeerDeltaBlocks(ctx context.Context, endpoint string, ref LaneRef) ([]TaskBlock, int, int, error) {
+	inventory, err := fetchPeerInventory(ctx, endpoint, ref)
+	if err != nil {
+		blocks, fallbackErr := fetchPeerBlocks(ctx, endpoint, ref)
+		if fallbackErr != nil {
+			return nil, 0, 0, fmt.Errorf("inventory failed (%v); fallback lane.blocks failed: %w", err, fallbackErr)
+		}
+		return blocks, len(blocks), len(blocks), nil
+	}
+
+	missingIDs := make([]string, 0, len(inventory.Blocks))
+	for _, entry := range inventory.Blocks {
+		exists, err := s.store.HasBlock(ctx, entry.BlockID)
+		if err != nil {
+			return nil, len(inventory.Blocks), len(missingIDs), err
+		}
+		if !exists {
+			missingIDs = append(missingIDs, entry.BlockID)
+		}
+	}
+	if len(missingIDs) == 0 {
+		return []TaskBlock{}, len(inventory.Blocks), 0, nil
+	}
+
+	blocks, err := fetchPeerBlocksByID(ctx, endpoint, ref, missingIDs)
+	if err != nil {
+		return nil, len(inventory.Blocks), len(missingIDs), err
+	}
+	requested := make(map[string]bool, len(missingIDs))
+	for _, blockID := range missingIDs {
+		requested[blockID] = true
+	}
+	for _, block := range blocks {
+		if !requested[block.BlockID] {
+			return nil, len(inventory.Blocks), len(missingIDs), fmt.Errorf("peer returned unrequested block %s", block.BlockID)
+		}
+		delete(requested, block.BlockID)
+	}
+	if len(requested) > 0 {
+		return nil, len(inventory.Blocks), len(missingIDs), fmt.Errorf("peer advertised %d missing blocks but did not return %d of them", len(missingIDs), len(requested))
+	}
+	return blocks, len(inventory.Blocks), len(missingIDs), nil
+}
+
+func fetchPeerInventory(ctx context.Context, endpoint string, ref LaneRef) (LaneInventory, error) {
+	var inventory LaneInventory
+	if err := callPeerJSONRPC(ctx, endpoint, "lane.inventory", ref, &inventory); err != nil {
+		return LaneInventory{}, err
+	}
+	return inventory, nil
+}
+
+func fetchPeerBlocksByID(ctx context.Context, endpoint string, ref LaneRef, blockIDs []string) ([]TaskBlock, error) {
+	if len(blockIDs) == 0 {
+		return []TaskBlock{}, nil
+	}
+	var blocks []TaskBlock
+	input := LaneBlocksGetInput{ProjectID: ref.ProjectID, TaskID: ref.TaskID, LaneID: ref.LaneID, BlockIDs: blockIDs}
+	if err := callPeerJSONRPC(ctx, endpoint, "lane.blocks.get", input, &blocks); err != nil {
+		return nil, err
+	}
+	return blocks, nil
 }
 
 func fetchPeerBlocks(ctx context.Context, endpoint string, ref LaneRef) ([]TaskBlock, error) {

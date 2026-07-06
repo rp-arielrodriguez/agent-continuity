@@ -391,9 +391,13 @@ Human/CLI          Local Daemon       PeerBook          Remote Daemon
     |-------------------->| list trusted peers                 |
     |                     |---------------->|                  |
     |                     |<----------------| endpoints        |
-    |                     | lane.blocks(ref)                   |
+    |                     | lane.inventory(ref)                |
     |                     |----------------------------------->|
-    |                     | signed blocks                      |
+    |                     | advertised heads/block IDs         |
+    |                     |<-----------------------------------|
+    |                     | lane.blocks.get(missing IDs)       |
+    |                     |----------------------------------->|
+    |                     | missing signed blocks              |
     |                     |<-----------------------------------|
     |                     | validate and index                 |
 ```
@@ -674,9 +678,13 @@ CLI/Agent          Local Daemon       Trusted PeerBook      Remote Daemon
    |------------------->| list enabled peers |                    |
    |                    |------------------->|                    |
    |                    |<-------------------| endpoints          |
-   |                    | lane.blocks(ref)   |                    |
+   |                    | lane.inventory(ref)|                    |
    |                    |----------------------------------------->|
-   |                    | blocks[] over read-only JSON-RPC        |
+   |                    | heads + active block IDs                |
+   |                    |<-----------------------------------------|
+   |                    | lane.blocks.get(missing IDs)            |
+   |                    |----------------------------------------->|
+   |                    | missing blocks over read-only JSON-RPC  |
    |                    |<-----------------------------------------|
    |                    | validate signatures/tip/epoch           |
    |                    | index accepted blocks                   |
@@ -848,12 +856,19 @@ Phase 6: migration foundation done
   The Postgres wrapper reads current continuity.journal_entries and canons; the
   pure migrator is tested against MemoryProvider.
 
-Phase 7: static peer sync done
-  daemon/internal/continuityd/peer.go implements peer.sync.
-  The daemon pulls lane.blocks from explicit trusted unix:// or tcp:// peer
-  endpoints and ingests fetched blocks through the normal signed-block
-  validation path.
-  src/daemon-provider.ts exposes LocalDaemonProvider.syncPeers().
+Phase 7: delta peer sync and compacted lane storage done
+  daemon/internal/continuityd/peer.go implements peer.sync as an inventory-first
+  protocol. Peers expose lane.inventory, lane.blocks.get, project.inventory, and
+  blob.get over read-only unix:// or tcp:// listeners; sync fetches only missing
+  advertised block IDs and falls back to legacy lane.blocks for mixed-version
+  peers.
+  lane_snapshot blocks summarize current canon, inventory, checkpoint, owner, and
+  base block IDs. retention.apply archives cold active blocks only after a
+  snapshot by default, keeping the latest snapshot plus its contiguous suffix
+  replayable. Large strings are stored as content-addressed daemon blobs and
+  hydrated transparently when blocks are read.
+  src/daemon-provider.ts exposes LocalDaemonProvider.syncPeers(),
+  laneInventory(), projectInventory(), applyRetention(), and blob().
 
 Phase 8: overlay discovery done
   daemon/internal/continuityd/discovery.go discovers candidate Tailscale and

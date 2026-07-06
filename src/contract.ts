@@ -1,4 +1,4 @@
-import type { ActorRef, CanonUpdatePayload, CheckpointPayload, HandoffPayload, InventoryUpdatePayload, LaneRef, ReconcilePayload, TaskBlock } from "./block.js";
+import type { ActorRef, CanonUpdatePayload, CheckpointPayload, HandoffPayload, InventoryUpdatePayload, LaneRef, LaneSnapshotPayload, ReconcilePayload, TaskBlock } from "./block.js";
 import { isSameLane, validateTaskBlock } from "./block.js";
 
 export interface LaneOwner extends ActorRef {
@@ -68,7 +68,7 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
   if (current && !isSameLane(block, current)) {
     return reject("reconcile", "invalid_block", "block lane does not match transition context");
   }
-  if (block.parentTips.some((tip) => !context.hasBlock(tip))) {
+  if (block.kind !== "lane_snapshot" && block.parentTips.some((tip) => !context.hasBlock(tip))) {
     return reject("reconcile", "unknown_parent_tip", "block references a parent tip that is not known locally");
   }
 
@@ -92,6 +92,8 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
       return validateTipExtendingBlock(block, current, "pause");
     case "reconcile":
       return validateReconcile(block, current, context);
+    case "lane_snapshot":
+      return validateLaneSnapshot(block, current);
     case "task_intent":
     case "worker_profile":
     case "task_assignment":
@@ -170,6 +172,23 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
       if (payload.inventoryMarkdown) next.inventoryMarkdown = payload.inventoryMarkdown;
       break;
     }
+    case "lane_snapshot": {
+      const payload = block.payload as LaneSnapshotPayload;
+      if (payload.canonMarkdown) next.canonMarkdown = payload.canonMarkdown;
+      if (payload.inventoryMarkdown) next.inventoryMarkdown = payload.inventoryMarkdown;
+      if (payload.checkpoint) {
+        next.checkpoint = {
+          status: payload.checkpoint.status,
+          progress: payload.checkpoint.progress,
+          files: payload.checkpoint.files,
+          blocking: payload.checkpoint.blocking,
+          next: payload.checkpoint.next,
+        };
+      }
+      if (payload.owner) next.owner = { ...payload.owner };
+      next.heads = [block.blockId];
+      break;
+    }
     case "task_intent":
     case "worker_profile":
     case "task_assignment":
@@ -239,6 +258,19 @@ function validateTipExtendingBlock(block: TaskBlock, current: LaneProjection | u
   if (!current?.tip) return reject("reconcile", "lane_missing", `${kind} requires an existing lane tip`);
   if (currentHeads(current).includes(block.blockId)) return reject("continue", "duplicate_tip", `${kind} block is already a current head`);
   return validateCurrentHeadParentTips(block, current);
+}
+
+function validateLaneSnapshot(block: TaskBlock, current: LaneProjection | undefined): TransitionValidationResult {
+  if (!current?.tip) return accept();
+  const parent = validateCurrentHeadParentTips(block, current);
+  if (!parent.ok) return parent;
+  if (current.owner && !isSameActor(current.owner, block)) {
+    return reject("pause", "not_lane_owner", "lane_snapshot signer is not the current lane owner");
+  }
+  if (block.leaseEpoch !== current.leaseEpoch) {
+    return reject("reconcile", "stale_lease_epoch", `lane_snapshot leaseEpoch ${block.leaseEpoch} does not match current epoch ${current.leaseEpoch}`);
+  }
+  return accept();
 }
 
 function validateReconcile(block: TaskBlock, current: LaneProjection | undefined, context: TransitionContext): TransitionValidationResult {

@@ -39,6 +39,92 @@ type TaskBlock struct {
 	Signature   BlockSignature `json:"signature"`
 }
 
+type BlockInventoryEntry struct {
+	Sequence    int64    `json:"sequence"`
+	BlockID     string   `json:"blockId"`
+	Kind        string   `json:"kind"`
+	ParentTips  []string `json:"parentTips"`
+	PayloadHash string   `json:"payloadHash"`
+	CreatedAt   string   `json:"createdAt"`
+	SizeBytes   int      `json:"sizeBytes"`
+	BlobDigests []string `json:"blobDigests,omitempty"`
+}
+
+type LaneInventory struct {
+	ProjectID     string                `json:"projectId"`
+	TaskID        string                `json:"taskId"`
+	LaneID        string                `json:"laneId"`
+	Tip           string                `json:"tip,omitempty"`
+	Heads         []string              `json:"heads,omitempty"`
+	BlockCount    int                   `json:"blockCount"`
+	ArchivedCount int                   `json:"archivedCount"`
+	Blocks        []BlockInventoryEntry `json:"blocks"`
+}
+
+type ProjectLaneInventoryInput struct {
+	ProjectID string `json:"projectId"`
+	TaskID    string `json:"taskId,omitempty"`
+	LaneID    string `json:"laneId,omitempty"`
+}
+
+type ProjectLaneInventoryEntry struct {
+	ProjectID     string   `json:"projectId"`
+	TaskID        string   `json:"taskId"`
+	LaneID        string   `json:"laneId"`
+	Tip           string   `json:"tip,omitempty"`
+	Heads         []string `json:"heads,omitempty"`
+	LeaseEpoch    int64    `json:"leaseEpoch"`
+	BlockCount    int      `json:"blockCount"`
+	ArchivedCount int      `json:"archivedCount"`
+	UpdatedAt     string   `json:"updatedAt,omitempty"`
+}
+
+type ProjectLaneInventory struct {
+	ProjectID string                      `json:"projectId"`
+	TaskID    string                      `json:"taskId,omitempty"`
+	LaneID    string                      `json:"laneId,omitempty"`
+	Lanes     []ProjectLaneInventoryEntry `json:"lanes"`
+}
+
+type LaneBlocksGetInput struct {
+	ProjectID string   `json:"projectId"`
+	TaskID    string   `json:"taskId"`
+	LaneID    string   `json:"laneId"`
+	BlockIDs  []string `json:"blockIds"`
+}
+
+type RetentionApplyInput struct {
+	ProjectID            string `json:"projectId"`
+	TaskID               string `json:"taskId"`
+	LaneID               string `json:"laneId"`
+	KeepRecent           int    `json:"keepRecent"`
+	RequireSnapshot      bool   `json:"requireSnapshot"`
+	AllowWithoutSnapshot bool   `json:"allowWithoutSnapshot,omitempty"`
+	Reason               string `json:"reason,omitempty"`
+	Now                  string `json:"now,omitempty"`
+}
+
+type RetentionApplyResult struct {
+	ProjectID       string `json:"projectId"`
+	TaskID          string `json:"taskId"`
+	LaneID          string `json:"laneId"`
+	ArchivedBlocks  int    `json:"archivedBlocks"`
+	ActiveBlocks    int    `json:"activeBlocks"`
+	ArchivedAt      string `json:"archivedAt,omitempty"`
+	LatestSnapshot  string `json:"latestSnapshot,omitempty"`
+	RequireSnapshot bool   `json:"requireSnapshot"`
+}
+
+type BlobGetInput struct {
+	Digest string `json:"digest"`
+}
+
+type BlobGetResult struct {
+	Digest    string `json:"digest"`
+	SizeBytes int    `json:"sizeBytes"`
+	Content   string `json:"contentBase64"`
+}
+
 type LaneOwner struct {
 	NodeID     string `json:"nodeId"`
 	ActorID    string `json:"actorId"`

@@ -129,6 +129,69 @@ test("local daemon provider calls trusted peer sync over JSON-RPC", async () => 
   });
 });
 
+test("local daemon provider calls inventory, retention, and blob RPC methods", async () => {
+  const calls: string[] = [];
+  await withRpcServer(async (request) => {
+    calls.push(request.method);
+    if (request.method === "lane.inventory") {
+      assert.deepEqual(request.params, ref);
+      return {
+        ...ref,
+        tip: "blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        heads: ["blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        blockCount: 1,
+        archivedCount: 2,
+        blocks: [
+          {
+            sequence: 3,
+            blockId: "blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            kind: "lane_snapshot",
+            parentTips: ["blk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+            payloadHash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            createdAt: "2026-07-06T10:00:00.000Z",
+            sizeBytes: 512,
+            blobDigests: ["sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"],
+          },
+        ],
+      };
+    }
+    if (request.method === "project.inventory") {
+      assert.deepEqual(request.params, { projectId: ref.projectId, taskId: ref.taskId });
+      return {
+        projectId: ref.projectId,
+        taskId: ref.taskId,
+        lanes: [{ ...ref, leaseEpoch: 1, blockCount: 1, archivedCount: 2 }],
+      };
+    }
+    if (request.method === "retention.apply") {
+      assert.deepEqual(request.params, { ...ref, keepRecent: 10, requireSnapshot: true, reason: "cold lane" });
+      return { ...ref, archivedBlocks: 2, activeBlocks: 1, latestSnapshot: "blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", requireSnapshot: true };
+    }
+    if (request.method === "blob.get") {
+      assert.deepEqual(request.params, { digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" });
+      return {
+        digest: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        sizeBytes: 5,
+        contentBase64: "aGVsbG8=",
+      };
+    }
+    throw new Error(`unexpected method ${request.method}`);
+  }, async (socketPath) => {
+    const provider = new LocalDaemonProvider({ socketPath });
+    const lane = await provider.laneInventory(ref);
+    const project = await provider.projectInventory({ projectId: ref.projectId, taskId: ref.taskId });
+    const retention = await provider.applyRetention({ ...ref, keepRecent: 10, requireSnapshot: true, reason: "cold lane" });
+    const blob = await provider.blob("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+
+    assert.equal(lane.archivedCount, 2);
+    assert.equal(lane.blocks[0].kind, "lane_snapshot");
+    assert.equal(project.lanes[0].blockCount, 1);
+    assert.equal(retention.archivedBlocks, 2);
+    assert.equal(blob.contentBase64, "aGVsbG8=");
+    assert.deepEqual(calls, ["lane.inventory", "project.inventory", "retention.apply", "blob.get"]);
+  });
+});
+
 test("local daemon provider manages trusted peer address book over JSON-RPC", async () => {
   const calls: string[] = [];
   await withRpcServer(async (request) => {
