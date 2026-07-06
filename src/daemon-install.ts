@@ -108,8 +108,8 @@ export function daemonConfigFromInstallResult(result: DaemonInstallResult, launc
   };
 }
 
-export function defaultDaemonRuntimeConfig(home = os.homedir()): DaemonRuntimeConfig {
-  const paths = resolveDaemonRuntimePaths({ home });
+export function defaultDaemonRuntimeConfig(home = os.homedir(), platform: NodeJS.Platform = process.platform): DaemonRuntimeConfig {
+  const paths = resolveDaemonRuntimePaths({ home, launchd: platform === "darwin" });
   return daemonConfigFromInstallResult(paths);
 }
 
