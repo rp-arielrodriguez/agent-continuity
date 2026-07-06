@@ -59,6 +59,7 @@ type LaneProjection struct {
 	TaskID            string                `json:"taskId"`
 	LaneID            string                `json:"laneId"`
 	Tip               string                `json:"tip,omitempty"`
+	Heads             []string              `json:"heads,omitempty"`
 	LeaseEpoch        int64                 `json:"leaseEpoch"`
 	Owner             *LaneOwner            `json:"owner,omitempty"`
 	CanonMarkdown     string                `json:"canonMarkdown,omitempty"`

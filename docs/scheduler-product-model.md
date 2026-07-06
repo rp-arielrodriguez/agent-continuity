@@ -101,6 +101,18 @@ speculative
 The default should be `exclusive`. Speculative execution is useful, but it must
 be explicit because coding tasks have side effects.
 
+Speculative execution uses fork-aware scheduler heads. If two workers sync the
+same task intent and then run offline, each worker can publish a result branch
+from the same parent. Peer sync accepts both branches as current heads instead
+of rejecting the second result as stale. A later `task_adjudication` block records
+the candidate result ids, the optional winning result id, and the selection
+summary. When adjudication is written with all current heads as parents, the
+lane collapses back to one head while preserving every candidate result block.
+
+Owned checkpoint/canon lanes remain stricter: they still extend current heads and
+use leases to avoid accidental parallel writes. Forking is intentional scheduler
+behavior, not a blanket rule for all continuity state.
+
 ## tmux Role
 
 tmux is a local operator frontend, not distributed state.

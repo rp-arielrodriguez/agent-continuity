@@ -35,6 +35,7 @@ interface ProjectionRow {
   task_id: string;
   lane_id: string;
   tip: string | null;
+  heads_json: string | null;
   lease_epoch: number;
   owner_node_id: string | null;
   owner_actor_id: string | null;
@@ -216,10 +217,12 @@ export class SQLiteTaskStore {
         canon_markdown text,
         inventory_markdown text,
         checkpoint_json text,
+        heads_json text,
         updated_at text,
         PRIMARY KEY (project_id, task_id, lane_id)
       );
     `);
+    this.ensureColumn("lane_projections", "heads_json", "text");
 
     this.db
       .prepare<[string]>(
@@ -264,10 +267,11 @@ export class SQLiteTaskStore {
         `INSERT INTO lane_projections (
            project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
            owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
-           inventory_markdown, checkpoint_json, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           inventory_markdown, checkpoint_json, heads_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_id, task_id, lane_id) DO UPDATE SET
            tip = excluded.tip,
+           heads_json = excluded.heads_json,
            lease_epoch = excluded.lease_epoch,
            owner_node_id = excluded.owner_node_id,
            owner_actor_id = excluded.owner_actor_id,
@@ -291,8 +295,15 @@ export class SQLiteTaskStore {
         lane.canonMarkdown ?? null,
         lane.inventoryMarkdown ?? null,
         lane.checkpoint ? JSON.stringify(lane.checkpoint) : null,
+        lane.heads?.length ? JSON.stringify(lane.heads) : null,
         lane.updatedAt ?? null,
       );
+  }
+
+  private ensureColumn(table: string, column: string, definition: string): void {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (rows.some((row) => row.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
 
@@ -350,6 +361,7 @@ function rowToProjection(row: ProjectionRow): LaneProjection {
     taskId: row.task_id,
     laneId: row.lane_id,
     tip: row.tip ?? undefined,
+    heads: row.heads_json ? parseJson<string[]>(row.heads_json, `heads projection for ${row.project_id}/${row.task_id}/${row.lane_id}`) : row.tip ? [row.tip] : undefined,
     leaseEpoch: row.lease_epoch,
     owner:
       row.owner_node_id && row.owner_actor_id && row.owner_lease_epoch !== null

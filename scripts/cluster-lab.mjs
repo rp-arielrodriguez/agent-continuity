@@ -161,22 +161,23 @@ try {
       modelFamilies: "gpt",
       tools: "shell,git",
     });
-    const workerA = await schedulerRun("worker-a", taskId, {
-      workerId: "worker-a-codex",
-      agent: "codex",
-      modelFamilies: "gpt",
-      tools: "shell,git",
-      command: "printf worker-a-speculative-ok",
-      sync: true,
-    });
-    const workerB = await schedulerRun("worker-b", taskId, {
-      workerId: "worker-b-codex",
-      agent: "codex",
-      modelFamilies: "gpt",
-      tools: "shell,git",
-      command: "printf worker-b-speculative-ok",
-      sync: true,
-    });
+    await Promise.all([peerSync("worker-a", taskId), peerSync("worker-b", taskId)]);
+    const [workerA, workerB] = await Promise.all([
+      schedulerRun("worker-a", taskId, {
+        workerId: "worker-a-codex",
+        agent: "codex",
+        modelFamilies: "gpt",
+        tools: "shell,git",
+        command: "printf worker-a-speculative-ok",
+      }),
+      schedulerRun("worker-b", taskId, {
+        workerId: "worker-b-codex",
+        agent: "codex",
+        modelFamilies: "gpt",
+        tools: "shell,git",
+        command: "printf worker-b-speculative-ok",
+      }),
+    ]);
     assertEqual(workerA.status, "completed", "worker-a should complete speculative task");
     assertEqual(workerB.status, "completed", "worker-b should complete speculative task");
 
@@ -184,8 +185,21 @@ try {
     const dashboard = await schedulerDashboard("orchestrator", taskId);
     const workerIds = new Set(dashboard.results.map((result) => result.payload.workerId));
     assertEqual(dashboard.results.length, 2, "speculative task should keep both results");
+    assertEqual(dashboard.heads.length, 2, "offline speculative results should produce two current heads before adjudication");
     assert(workerIds.has("worker-a-codex"), "speculative dashboard should include worker-a result");
     assert(workerIds.has("worker-b-codex"), "speculative dashboard should include worker-b result");
+
+    const winner = dashboard.results.find((result) => result.payload.workerId === "worker-b-codex");
+    assert(winner, "expected worker-b result to be available for adjudication");
+    await schedulerAdjudicate("orchestrator", taskId, {
+      intentBlockId: dashboard.intents[0].blockId,
+      resultBlockIds: dashboard.results.map((result) => result.blockId),
+      winnerResultBlockId: winner.blockId,
+      summary: "Selected worker-b speculative output.",
+    });
+    const adjudicated = await schedulerDashboard("orchestrator", taskId);
+    assertEqual(adjudicated.heads.length, 1, "adjudication should collapse fork heads");
+    assertEqual(adjudicated.intents[0].latestAdjudication.payload.winnerResultBlockId, winner.blockId, "dashboard should record adjudication winner");
   });
 
   console.log("\ncluster-lab: passed");
@@ -304,6 +318,27 @@ async function schedulerDashboard(nodeName, taskId) {
     taskId,
     "--lane-id",
     "scheduler",
+    "--json",
+  ]);
+}
+
+async function schedulerAdjudicate(nodeName, taskId, input) {
+  return jsonContinuity(nodeName, [
+    "scheduler-adjudicate",
+    "--project-id",
+    projectId,
+    "--task-id",
+    taskId,
+    "--lane-id",
+    "scheduler",
+    "--intent-block-id",
+    input.intentBlockId,
+    "--result-block-ids",
+    input.resultBlockIds.join(","),
+    "--winner-result-block-id",
+    input.winnerResultBlockId,
+    "--summary",
+    input.summary,
     "--json",
   ]);
 }

@@ -169,6 +169,104 @@ test("sqlite provider rejects externally built stale parent tips", async () => {
   });
 });
 
+test("sqlite provider accepts forked scheduler results and merges heads with adjudication", async () => {
+  await withSqliteProvider(async (provider) => {
+    const orchestrator = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler" });
+    const workerA = createEd25519Signer({ nodeId: "worker-a", actorId: "codex" });
+    const workerB = createEd25519Signer({ nodeId: "worker-b", actorId: "codex" });
+    const schedulerRef = { ...ref, taskId: "forked-scheduler-runtime", laneId: "scheduler" };
+
+    const bootstrap = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "bootstrap",
+        parentTips: [],
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:10:00.000Z",
+        payload: { summary: "Start scheduler lane." },
+      },
+      orchestrator,
+    );
+    assert.equal((await provider.submitBlock(bootstrap)).accepted, true);
+
+    const intent = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "task_intent",
+        parentTips: [bootstrap.blockId],
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:11:00.000Z",
+        payload: {
+          title: "Offline competition",
+          instructions: "Accept competing useful results.",
+          policy: "speculative",
+        },
+      },
+      orchestrator,
+    );
+    assert.equal((await provider.submitBlock(intent)).accepted, true);
+
+    const resultA = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "task_result",
+        parentTips: [intent.blockId],
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:12:00.000Z",
+        payload: {
+          intentBlockId: intent.blockId,
+          workerId: "worker-a",
+          status: "completed",
+          summary: "Result A.",
+        },
+      },
+      workerA,
+    );
+    assert.equal((await provider.submitBlock(resultA)).accepted, true);
+
+    const resultB = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "task_result",
+        parentTips: [intent.blockId],
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:13:00.000Z",
+        payload: {
+          intentBlockId: intent.blockId,
+          workerId: "worker-b",
+          status: "completed",
+          summary: "Result B.",
+        },
+      },
+      workerB,
+    );
+    const fork = await provider.submitBlock(resultB);
+    assert.equal(fork.accepted, true);
+    assert.deepEqual(new Set(fork.lane.heads), new Set([resultA.blockId, resultB.blockId]));
+
+    const adjudication = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "task_adjudication",
+        parentTips: fork.lane.heads,
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:14:00.000Z",
+        payload: {
+          intentBlockId: intent.blockId,
+          resultBlockIds: [resultA.blockId, resultB.blockId],
+          winnerResultBlockId: resultB.blockId,
+          summary: "Selected result B.",
+        },
+      },
+      orchestrator,
+    );
+    const merged = await provider.submitBlock(adjudication);
+    assert.equal(merged.accepted, true);
+    assert.deepEqual(merged.lane.heads, [adjudication.blockId]);
+    assert.equal(merged.lane.tip, adjudication.blockId);
+  });
+});
+
 async function withSqliteProvider(run: (provider: SQLiteProvider, file: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-sqlite-"));
   const file = path.join(dir, "continuity.db");

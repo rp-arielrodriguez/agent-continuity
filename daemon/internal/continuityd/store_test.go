@@ -254,6 +254,134 @@ func TestSQLiteStoreAcceptsCollaborativeSchedulerBlocks(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreAcceptsForkedSchedulerResultsAndAdjudication(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	orchestrator := newTestSigner(t, "a0263", "scheduler")
+	workerA := newTestSigner(t, "worker-a", "codex")
+	workerB := newTestSigner(t, "worker-b", "codex")
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "forked-scheduler-runtime", LaneID: "scheduler"}
+
+	bootstrap := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "bootstrap",
+		ParentTips: []string{},
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:10:00.000Z",
+		Payload: map[string]any{
+			"summary": "Start scheduler lane.",
+		},
+	})
+	if result, err := store.AppendBlock(ctx, bootstrap, ""); err != nil || !result.Accepted {
+		t.Fatalf("bootstrap append failed: result=%+v err=%v", result, err)
+	}
+
+	intent := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_intent",
+		ParentTips: []string{bootstrap.BlockID},
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:11:00.000Z",
+		Payload: map[string]any{
+			"title":        "Offline competition",
+			"instructions": "Accept competing useful results.",
+			"policy":       "speculative",
+		},
+	})
+	if result, err := store.AppendBlock(ctx, intent, ""); err != nil || !result.Accepted {
+		t.Fatalf("intent append failed: result=%+v err=%v", result, err)
+	}
+
+	resultA := workerA.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_result",
+		ParentTips: []string{intent.BlockID},
+		NodeID:     workerA.nodeID,
+		ActorID:    workerA.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:12:00.000Z",
+		Payload: map[string]any{
+			"intentBlockId": intent.BlockID,
+			"workerId":      "worker-a",
+			"status":        "completed",
+			"summary":       "Result A.",
+		},
+	})
+	if result, err := store.AppendBlock(ctx, resultA, ""); err != nil || !result.Accepted {
+		t.Fatalf("result A append failed: result=%+v err=%v", result, err)
+	}
+
+	resultB := workerB.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_result",
+		ParentTips: []string{intent.BlockID},
+		NodeID:     workerB.nodeID,
+		ActorID:    workerB.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:13:00.000Z",
+		Payload: map[string]any{
+			"intentBlockId": intent.BlockID,
+			"workerId":      "worker-b",
+			"status":        "completed",
+			"summary":       "Result B.",
+		},
+	})
+	fork, err := store.AppendBlock(ctx, resultB, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fork.Accepted || !sameStringSet(fork.Lane.Heads, []string{resultA.BlockID, resultB.BlockID}) {
+		t.Fatalf("fork append did not preserve both heads: %+v", fork)
+	}
+
+	adjudication := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_adjudication",
+		ParentTips: fork.Lane.Heads,
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:14:00.000Z",
+		Payload: map[string]any{
+			"intentBlockId":       intent.BlockID,
+			"resultBlockIds":      []any{resultA.BlockID, resultB.BlockID},
+			"winnerResultBlockId": resultB.BlockID,
+			"summary":             "Selected result B.",
+		},
+	})
+	merged, err := store.AppendBlock(ctx, adjudication, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !merged.Accepted || len(merged.Lane.Heads) != 1 || merged.Lane.Heads[0] != adjudication.BlockID {
+		t.Fatalf("adjudication did not merge heads: %+v", merged)
+	}
+}
+
 func TestSQLiteStoreTrustedPeersLifecycle(t *testing.T) {
 	ctx := context.Background()
 	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")
@@ -365,4 +493,21 @@ func (s testSigner) signBlock(t *testing.T, block TaskBlock) TaskBlock {
 	}
 	block.BlockID = blockID
 	return block
+}
+
+func sameStringSet(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	seen := map[string]int{}
+	for _, value := range left {
+		seen[value]++
+	}
+	for _, value := range right {
+		seen[value]--
+		if seen[value] < 0 {
+			return false
+		}
+	}
+	return true
 }

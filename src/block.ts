@@ -21,7 +21,8 @@ export type TaskBlockKind =
   | "task_intent"
   | "worker_profile"
   | "task_assignment"
-  | "task_result";
+  | "task_result"
+  | "task_adjudication";
 
 const TASK_BLOCK_KINDS = new Set<string>([
   "bootstrap",
@@ -38,6 +39,7 @@ const TASK_BLOCK_KINDS = new Set<string>([
   "worker_profile",
   "task_assignment",
   "task_result",
+  "task_adjudication",
 ]);
 
 const CHECKPOINT_STATUSES = new Set<string>(["pending", "in_progress", "blocked", "completed", "cancelled"]);
@@ -88,7 +90,8 @@ export type TaskBlockPayload =
   | TaskIntentPayload
   | WorkerProfilePayload
   | TaskAssignmentPayload
-  | TaskResultPayload;
+  | TaskResultPayload
+  | TaskAdjudicationPayload;
 
 export interface BootstrapPayload {
   summary: string;
@@ -200,6 +203,13 @@ export interface TaskResultPayload {
   startedAt?: string;
   completedAt?: string;
   tmuxSession?: string;
+}
+
+export interface TaskAdjudicationPayload {
+  intentBlockId: string;
+  resultBlockIds: string[];
+  winnerResultBlockId?: string;
+  summary: string;
 }
 
 export interface ContinuitySigner extends ActorRef {
@@ -522,6 +532,14 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalTimestamp(payload, "startedAt", issues);
       optionalTimestamp(payload, "completedAt", issues);
       optionalString(payload, "tmuxSession", issues);
+      break;
+    case "task_adjudication":
+      requireBlockId(payload, "intentBlockId", issues);
+      if (!Array.isArray((payload as TaskAdjudicationPayload).resultBlockIds) || (payload as TaskAdjudicationPayload).resultBlockIds.length === 0 || (payload as TaskAdjudicationPayload).resultBlockIds.some((blockId) => !isBlockId(blockId))) {
+        issues.push(issue("invalid_kind_payload", "task_adjudication resultBlockIds must contain at least one valid block id"));
+      }
+      optionalBlockId(payload, "winnerResultBlockId", issues);
+      requireString(payload, "summary", issues);
       break;
   }
   return { ok: issues.length === 0, issues };

@@ -7,6 +7,7 @@ import {
   loadSchedulerState,
   runSchedulerOnce,
   selectRunnableIntent,
+  submitTaskAdjudication,
   submitTaskAssignment,
   submitTaskIntent,
   workerMatchesIntent,
@@ -206,6 +207,66 @@ test("speculative intents can accept another worker after a completed result lan
 
   const state = await loadSchedulerState(provider, ref);
   assert.equal(state.results.length, 2);
+});
+
+test("scheduler adjudication records the winning result", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const intent = await submitTaskIntent({
+    ...ref,
+    provider,
+    signer,
+    createdAt: "2026-07-05T22:18:00.000Z",
+    payload: {
+      title: "Adjudicate outputs",
+      instructions: "Pick the best completed output.",
+      policy: "speculative",
+      requirements: { tools: ["shell"] },
+    },
+  });
+
+  const first = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:19:00.000Z",
+    worker: {
+      workerId: "worker-a",
+      agent: "codex",
+      tools: ["shell"],
+    },
+  });
+  const second = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:20:00.000Z",
+    worker: {
+      workerId: "worker-b",
+      agent: "codex",
+      tools: ["shell"],
+    },
+  });
+  assert.ok(first.resultBlock);
+  assert.ok(second.resultBlock);
+
+  const before = await provider.status(ref);
+  await submitTaskAdjudication({
+    ...ref,
+    provider,
+    signer,
+    parentTips: before.lane.heads,
+    payload: {
+      intentBlockId: intent.blockId,
+      resultBlockIds: [first.resultBlock.blockId, second.resultBlock.blockId],
+      winnerResultBlockId: second.resultBlock.blockId,
+      summary: "worker-b produced the selected output.",
+    },
+  });
+
+  const state = await loadSchedulerState(provider, ref);
+  assert.equal(state.adjudications.length, 1);
+  assert.equal(state.intents[0].latestAdjudication?.payload.winnerResultBlockId, second.resultBlock.blockId);
 });
 
 test("command runner timeout is recorded as a failed result", async () => {

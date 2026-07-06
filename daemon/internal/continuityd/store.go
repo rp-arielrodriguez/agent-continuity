@@ -93,6 +93,7 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
         canon_markdown text,
         inventory_markdown text,
         checkpoint_json text,
+        heads_json text,
         updated_at text,
 	        PRIMARY KEY (project_id, task_id, lane_id)
 	      );
@@ -118,6 +119,9 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
     `)
 	if err != nil {
 		return fmt.Errorf("migrate sqlite store: %w", err)
+	}
+	if err := ensureColumn(ctx, s.db, "lane_projections", "heads_json", "text"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -444,7 +448,7 @@ func hasBlock(ctx context.Context, db queryer, blockID string) (bool, error) {
 func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjection, bool, error) {
 	var row projectionRow
 	err := db.QueryRowContext(ctx, `
-      SELECT project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
+      SELECT project_id, task_id, lane_id, tip, heads_json, lease_epoch, owner_node_id,
              owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
              inventory_markdown, checkpoint_json, updated_at
       FROM lane_projections
@@ -453,6 +457,7 @@ func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjectio
 		&row.TaskID,
 		&row.LaneID,
 		&row.Tip,
+		&row.HeadsJSON,
 		&row.LeaseEpoch,
 		&row.OwnerNodeID,
 		&row.OwnerActorID,
@@ -538,12 +543,13 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
 	}
 	_, err := db.ExecContext(ctx, `
       INSERT INTO lane_projections (
-        project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
+        project_id, task_id, lane_id, tip, heads_json, lease_epoch, owner_node_id,
         owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
         inventory_markdown, checkpoint_json, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_id, task_id, lane_id) DO UPDATE SET
         tip = excluded.tip,
+        heads_json = excluded.heads_json,
         lease_epoch = excluded.lease_epoch,
         owner_node_id = excluded.owner_node_id,
         owner_actor_id = excluded.owner_actor_id,
@@ -557,6 +563,7 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
 		lane.TaskID,
 		lane.LaneID,
 		nullIfEmpty(lane.Tip),
+		headsJSON(lane.Heads),
 		lane.LeaseEpoch,
 		ownerNodeID,
 		ownerActorID,
@@ -611,6 +618,7 @@ type projectionRow struct {
 	TaskID            string
 	LaneID            string
 	Tip               sql.NullString
+	HeadsJSON         sql.NullString
 	LeaseEpoch        int64
 	OwnerNodeID       sql.NullString
 	OwnerActorID      sql.NullString
@@ -628,6 +636,7 @@ func (r projectionRow) toProjection() LaneProjection {
 		TaskID:            r.TaskID,
 		LaneID:            r.LaneID,
 		Tip:               nullStringValue(r.Tip),
+		Heads:             projectionHeads(r.HeadsJSON, r.Tip),
 		LeaseEpoch:        r.LeaseEpoch,
 		CanonMarkdown:     nullStringValue(r.CanonMarkdown),
 		InventoryMarkdown: nullStringValue(r.InventoryMarkdown),
@@ -648,6 +657,59 @@ func (r projectionRow) toProjection() LaneProjection {
 		}
 	}
 	return lane
+}
+
+func ensureColumn(ctx context.Context, db *sql.DB, table string, column string, definition string) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan %s column metadata: %w", table, err)
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate %s column metadata: %w", table, err)
+	}
+	if _, err := db.ExecContext(ctx, `ALTER TABLE `+table+` ADD COLUMN `+column+` `+definition); err != nil {
+		return fmt.Errorf("add %s.%s column: %w", table, column, err)
+	}
+	return nil
+}
+
+func headsJSON(heads []string) any {
+	if len(heads) == 0 {
+		return nil
+	}
+	bytes, err := json.Marshal(heads)
+	if err != nil {
+		return nil
+	}
+	return string(bytes)
+}
+
+func projectionHeads(headsJSON sql.NullString, tip sql.NullString) []string {
+	if headsJSON.Valid && headsJSON.String != "" {
+		var heads []string
+		if err := json.Unmarshal([]byte(headsJSON.String), &heads); err == nil && len(heads) > 0 {
+			return heads
+		}
+	}
+	if tip.Valid && tip.String != "" {
+		return []string{tip.String}
+	}
+	return nil
 }
 
 func nullStringValue(value sql.NullString) string {

@@ -117,6 +117,22 @@ test("validates scheduler block payloads", async () => {
 
   assert.equal(validateTaskBlock(block).ok, true);
 
+  const adjudication = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "task_adjudication",
+      leaseEpoch: 0,
+      payload: {
+        intentBlockId: block.blockId,
+        resultBlockIds: [block.blockId],
+        winnerResultBlockId: block.blockId,
+        summary: "Selected deterministic result.",
+      },
+    },
+    signer,
+  );
+  assert.equal(validateTaskBlock(adjudication).ok, true);
+
   await assert.rejects(
     createSignedTaskBlock(
       {

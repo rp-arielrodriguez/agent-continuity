@@ -8,6 +8,7 @@ export interface LaneOwner extends ActorRef {
 
 export interface LaneProjection extends LaneRef {
   tip?: string;
+  heads?: string[];
   leaseEpoch: number;
   owner?: LaneOwner;
   canonMarkdown?: string;
@@ -95,7 +96,8 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
     case "worker_profile":
     case "task_assignment":
     case "task_result":
-      return validateTipExtendingBlock(block, current, block.kind);
+    case "task_adjudication":
+      return validateSchedulerBlock(block, current, block.kind);
   }
 }
 
@@ -103,6 +105,7 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
   const next: LaneProjection = {
     ...(current ?? emptyLaneProjection(block)),
     tip: block.blockId,
+    heads: nextHeads(current, block),
     leaseEpoch: Math.max(current?.leaseEpoch ?? 0, block.leaseEpoch),
     updatedAt: block.createdAt,
   };
@@ -171,6 +174,7 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
     case "worker_profile":
     case "task_assignment":
     case "task_result":
+    case "task_adjudication":
       break;
   }
 
@@ -233,8 +237,8 @@ function validateOwnedTipBlock(block: TaskBlock, current: LaneProjection | undef
 
 function validateTipExtendingBlock(block: TaskBlock, current: LaneProjection | undefined, kind: string): TransitionValidationResult {
   if (!current?.tip) return reject("reconcile", "lane_missing", `${kind} requires an existing lane tip`);
-  if (block.blockId === current.tip) return reject("continue", "duplicate_tip", `${kind} block is already the current tip`);
-  return validateParentTips(block, current);
+  if (currentHeads(current).includes(block.blockId)) return reject("continue", "duplicate_tip", `${kind} block is already a current head`);
+  return validateCurrentHeadParentTips(block, current);
 }
 
 function validateReconcile(block: TaskBlock, current: LaneProjection | undefined, context: TransitionContext): TransitionValidationResult {
@@ -252,6 +256,43 @@ function validateParentTips(block: TaskBlock, current: LaneProjection | undefine
     return reject("reconcile", "stale_parent_tip", `parentTips must equal current tip ${expected[0] ?? "<empty>"}`);
   }
   return accept();
+}
+
+function validateCurrentHeadParentTips(block: TaskBlock, current: LaneProjection | undefined): TransitionValidationResult {
+  const heads = currentHeads(current);
+  if (heads.length === 0) {
+    return block.parentTips.length === 0
+      ? accept()
+      : reject("reconcile", "stale_parent_tip", "parentTips must equal current heads <empty>");
+  }
+  if (block.parentTips.length === 0) {
+    return reject("reconcile", "stale_parent_tip", `parentTips must include a current head: ${heads.join(", ")}`);
+  }
+  const unknownHeads = block.parentTips.filter((tip) => !heads.includes(tip));
+  if (unknownHeads.length > 0) {
+    return reject("reconcile", "stale_parent_tip", `parentTips must reference current heads: ${heads.join(", ")}`);
+  }
+  return accept();
+}
+
+function validateSchedulerBlock(block: TaskBlock, current: LaneProjection | undefined, kind: string): TransitionValidationResult {
+  if (!current?.tip) return reject("reconcile", "lane_missing", `${kind} requires an existing lane tip`);
+  if (currentHeads(current).includes(block.blockId)) return reject("continue", "duplicate_tip", `${kind} block is already a current head`);
+  if (block.parentTips.length === 0) return reject("reconcile", "stale_parent_tip", `${kind} requires at least one known parent tip`);
+  return accept();
+}
+
+function currentHeads(current: LaneProjection | undefined): string[] {
+  if (!current) return [];
+  if (current.heads?.length) return [...current.heads];
+  return current.tip ? [current.tip] : [];
+}
+
+function nextHeads(current: LaneProjection | undefined, block: TaskBlock): string[] {
+  const parentTips = new Set(block.parentTips);
+  const next = currentHeads(current).filter((tip) => !parentTips.has(tip));
+  next.push(block.blockId);
+  return [...new Set(next)];
 }
 
 function ownerLeaseExpired(owner: LaneOwner, now: string, leaseGraceMs: number): boolean {

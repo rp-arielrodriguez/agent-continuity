@@ -48,8 +48,8 @@ func ValidateBlockTransition(block TaskBlock, ctx TransitionContext) TransitionR
 		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
 	case "reconcile":
 		return validateReconcile(block, ctx)
-	case "task_intent", "worker_profile", "task_assignment", "task_result":
-		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
+	case "task_intent", "worker_profile", "task_assignment", "task_result", "task_adjudication":
+		return validateSchedulerBlock(block, ctx.Current, block.Kind)
 	default:
 		return reject(ActionReconcile, "invalid_block", "unsupported task block kind "+block.Kind)
 	}
@@ -63,6 +63,7 @@ func ApplyBlockToProjection(current *LaneProjection, block TaskBlock) LaneProjec
 		next = *current
 	}
 	next.Tip = block.BlockID
+	next.Heads = nextHeads(current, block)
 	if block.LeaseEpoch > next.LeaseEpoch {
 		next.LeaseEpoch = block.LeaseEpoch
 	}
@@ -196,10 +197,10 @@ func validateTipExtendingBlock(block TaskBlock, current *LaneProjection, kind st
 	if current == nil || current.Tip == "" {
 		return reject(ActionReconcile, "lane_missing", kind+" requires an existing lane tip")
 	}
-	if block.BlockID == current.Tip {
-		return reject(ActionContinue, "duplicate_tip", kind+" block is already the current tip")
+	if containsString(currentHeads(current), block.BlockID) {
+		return reject(ActionContinue, "duplicate_tip", kind+" block is already a current head")
 	}
-	return validateParentTips(block, current)
+	return validateCurrentHeadParentTips(block, current)
 }
 
 func validateReconcile(block TaskBlock, ctx TransitionContext) TransitionResult {
@@ -231,6 +232,80 @@ func validateParentTips(block TaskBlock, current *LaneProjection) TransitionResu
 		return reject(ActionReconcile, "stale_parent_tip", "parentTips must equal current tip "+expected)
 	}
 	return accept()
+}
+
+func validateCurrentHeadParentTips(block TaskBlock, current *LaneProjection) TransitionResult {
+	heads := currentHeads(current)
+	if len(heads) == 0 {
+		if len(block.ParentTips) == 0 {
+			return accept()
+		}
+		return reject(ActionReconcile, "stale_parent_tip", "parentTips must equal current heads <empty>")
+	}
+	if len(block.ParentTips) == 0 {
+		return reject(ActionReconcile, "stale_parent_tip", "parentTips must include a current head: "+strings.Join(heads, ", "))
+	}
+	for _, tip := range block.ParentTips {
+		if !containsString(heads, tip) {
+			return reject(ActionReconcile, "stale_parent_tip", "parentTips must reference current heads: "+strings.Join(heads, ", "))
+		}
+	}
+	return accept()
+}
+
+func validateSchedulerBlock(block TaskBlock, current *LaneProjection, kind string) TransitionResult {
+	if current == nil || current.Tip == "" {
+		return reject(ActionReconcile, "lane_missing", kind+" requires an existing lane tip")
+	}
+	if containsString(currentHeads(current), block.BlockID) {
+		return reject(ActionContinue, "duplicate_tip", kind+" block is already a current head")
+	}
+	if len(block.ParentTips) == 0 {
+		return reject(ActionReconcile, "stale_parent_tip", kind+" requires at least one known parent tip")
+	}
+	return accept()
+}
+
+func currentHeads(current *LaneProjection) []string {
+	if current == nil {
+		return nil
+	}
+	if len(current.Heads) > 0 {
+		return append([]string{}, current.Heads...)
+	}
+	if current.Tip != "" {
+		return []string{current.Tip}
+	}
+	return nil
+}
+
+func nextHeads(current *LaneProjection, block TaskBlock) []string {
+	parents := map[string]bool{}
+	for _, tip := range block.ParentTips {
+		parents[tip] = true
+	}
+	next := make([]string, 0, len(currentHeads(current))+1)
+	seen := map[string]bool{}
+	for _, tip := range currentHeads(current) {
+		if parents[tip] || seen[tip] {
+			continue
+		}
+		next = append(next, tip)
+		seen[tip] = true
+	}
+	if !seen[block.BlockID] {
+		next = append(next, block.BlockID)
+	}
+	return next
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func ownerLeaseExpired(owner LaneOwner, now string) bool {

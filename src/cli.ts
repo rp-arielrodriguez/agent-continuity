@@ -36,6 +36,7 @@ import {
   registerWorkerProfile,
   renderSchedulerDashboard,
   runSchedulerOnce,
+  submitTaskAdjudication,
   submitTaskIntent,
   submitTaskResult,
   type SchedulerRunner,
@@ -44,7 +45,7 @@ import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
-import type { TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
+import type { TaskAdjudicationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
 
 interface ParsedArgs {
   command: string;
@@ -397,6 +398,42 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         console.log(`status: ${block.payload.status}`);
         console.log(`result: ${block.blockId}`);
         console.log(`summary: ${block.payload.summary}`);
+      }
+      return;
+    }
+    case "scheduler-adjudicate": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-orchestrator-cli");
+      const status = await provider.status(ref);
+      const resultBlockIds = listOption(parsed, "result-block-ids");
+      const winnerResultBlockId = stringOption(parsed, "winner-result-block-id");
+      if (resultBlockIds.length === 0) throw new Error("--result-block-ids is required");
+      if (winnerResultBlockId && !resultBlockIds.includes(winnerResultBlockId)) {
+        throw new Error("--winner-result-block-id must be one of --result-block-ids");
+      }
+      const parentTips = listOption(parsed, "parent-tips");
+      const block = await submitTaskAdjudication({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        parentTips: parentTips.length > 0 ? parentTips : status.lane.heads ?? (status.lane.tip ? [status.lane.tip] : []),
+        createdAt: stringOption(parsed, "now"),
+        payload: {
+          intentBlockId: requiredOption(parsed, "intent-block-id"),
+          resultBlockIds,
+          winnerResultBlockId,
+          summary: requiredOption(parsed, "summary"),
+        } satisfies TaskAdjudicationPayload,
+      });
+      const output = { block, headsBefore: status.lane.heads ?? (status.lane.tip ? [status.lane.tip] : []), keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`adjudication: ${block.blockId}`);
+        console.log(`intent: ${block.payload.intentBlockId}`);
+        if (block.payload.winnerResultBlockId) console.log(`winner: ${block.payload.winnerResultBlockId}`);
+        console.log(`results: ${block.payload.resultBlockIds.join(",")}`);
+        console.log(`tip: ${block.blockId}`);
       }
       return;
     }
@@ -1346,6 +1383,7 @@ Commands:
   scheduler-worker-register Register a worker profile in a scheduler lane
   scheduler-run-once Sync optionally, claim one runnable task, and publish a result
   scheduler-result Publish a manual task result for an assignment
+  scheduler-adjudicate Select/record a winning result and merge scheduler heads
   daemon-install Build/install the local continuityd daemon binary
   daemon-start Start continuityd from configured or default daemon paths
   daemon-stop Stop continuityd from configured or default daemon paths
@@ -1397,6 +1435,7 @@ Examples:
   continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
   continuity scheduler-worker-register --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
   continuity scheduler-run-once --project-id PROJECT --task-id TASK --worker-id a0263-codex --agent codex --model-families gpt --tools shell,git
+  continuity scheduler-adjudicate --project-id PROJECT --task-id TASK --intent-block-id INTENT --result-block-ids RESULT_A,RESULT_B --winner-result-block-id RESULT_A --summary "Selected best output"
   continuity scheduler-dashboard --project-id PROJECT --task-id TASK --sync
   continuity peer-invite-create --endpoint tcp://10.44.110.222:9987
   continuity peer-invite-accept --invite 'continuity://peer?...'

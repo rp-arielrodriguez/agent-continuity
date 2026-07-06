@@ -404,6 +404,28 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 				issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 			}
 		}
+	case "task_adjudication":
+		if err := requiredPayloadBlockID(payload, "intentBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		values, ok := payload["resultBlockIds"].([]any)
+		if !ok || len(values) == 0 {
+			issues = appendIssue(issues, "invalid_kind_payload", "resultBlockIds must be a non-empty array")
+		} else {
+			for _, value := range values {
+				text, ok := value.(string)
+				if !ok || !validBlockID(text) {
+					issues = appendIssue(issues, "invalid_kind_payload", "resultBlockIds must contain valid block ids")
+					break
+				}
+			}
+		}
+		if err := optionalPayloadBlockID(payload, "winnerResultBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "summary"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
 	default:
 		issues = appendIssue(issues, "invalid_kind_payload", "unsupported task block kind "+kind)
 	}
