@@ -244,11 +244,34 @@ test("sqlite provider accepts forked scheduler results and merges heads with adj
     assert.equal(fork.accepted, true);
     assert.deepEqual(new Set(fork.lane.heads), new Set([resultA.blockId, resultB.blockId]));
 
+    const evaluation = await createSignedTaskBlock(
+      {
+        ...schedulerRef,
+        kind: "task_evaluation",
+        parentTips: fork.lane.heads,
+        leaseEpoch: 0,
+        createdAt: "2026-07-06T01:13:30.000Z",
+        payload: {
+          intentBlockId: intent.blockId,
+          resultBlockIds: [resultA.blockId, resultB.blockId],
+          recommendedWinnerResultBlockId: resultB.blockId,
+          confidence: "high",
+          requiredChecks: [{ name: "use_cases_pass", passed: true, evidence: ["UC-001 passed"] }],
+          useCases: [{ id: "UC-001", passed: true, evidence: ["recommendation is visible"] }],
+          summary: "Recommended result B with UX evidence.",
+        },
+      },
+      orchestrator,
+    );
+    const evaluated = await provider.submitBlock(evaluation);
+    assert.equal(evaluated.accepted, true);
+    assert.deepEqual(evaluated.lane.heads, [evaluation.blockId]);
+
     const adjudication = await createSignedTaskBlock(
       {
         ...schedulerRef,
         kind: "task_adjudication",
-        parentTips: fork.lane.heads,
+        parentTips: evaluated.lane.heads,
         leaseEpoch: 0,
         createdAt: "2026-07-06T01:14:00.000Z",
         payload: {

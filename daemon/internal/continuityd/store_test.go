@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -124,6 +125,60 @@ func TestSQLiteStoreBlocksReturnsEmptySliceForEmptyLane(t *testing.T) {
 	}
 	if len(blocks) != 0 {
 		t.Fatalf("len(blocks) = %d, want 0", len(blocks))
+	}
+}
+
+func TestSQLiteStoreMigratesArchiveColumnsBeforeActiveIndex(t *testing.T) {
+	ctx := context.Background()
+	dbPath := t.TempDir() + "/continuity.db"
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `
+      CREATE TABLE store_meta (
+        key text PRIMARY KEY,
+        value text NOT NULL
+      );
+      CREATE TABLE task_blocks (
+        sequence integer PRIMARY KEY AUTOINCREMENT,
+        block_id text NOT NULL UNIQUE,
+        version integer NOT NULL,
+        project_id text NOT NULL,
+        task_id text NOT NULL,
+        lane_id text NOT NULL,
+        kind text NOT NULL,
+        parent_tips_json text NOT NULL,
+        node_id text NOT NULL,
+        actor_id text NOT NULL,
+        lease_epoch integer NOT NULL,
+        created_at text NOT NULL,
+        payload_hash text NOT NULL,
+        payload_json text NOT NULL,
+        signature_json text NOT NULL,
+        block_json text NOT NULL
+      );
+    `)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenSQLiteStore(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	for _, column := range []string{"archived_at", "archive_reason"} {
+		if !sqliteColumnExists(t, store.db, "task_blocks", column) {
+			t.Fatalf("missing migrated task_blocks.%s column", column)
+		}
+	}
+	if !sqliteIndexExists(t, store.db, "task_blocks_lane_active_sequence_idx") {
+		t.Fatal("missing task_blocks_lane_active_sequence_idx")
 	}
 }
 
@@ -428,13 +483,100 @@ func TestSQLiteStoreAcceptsForkedSchedulerResultsAndAdjudication(t *testing.T) {
 		t.Fatalf("fork append did not preserve both heads: %+v", fork)
 	}
 
+	invalidEvaluation := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_evaluation",
+		ParentTips: fork.Lane.Heads,
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:13:15.000Z",
+		Payload: map[string]any{
+			"intentBlockId":  intent.BlockID,
+			"resultBlockIds": []any{resultA.BlockID},
+			"scores": []any{
+				map[string]any{"resultBlockId": resultB.BlockID, "totalScore": 91.0},
+			},
+			"summary": "Invalid score target.",
+		},
+	})
+	rejected, err := store.AppendBlock(ctx, invalidEvaluation, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Accepted || rejected.Rejection == nil || rejected.Rejection.Code != "invalid_block" {
+		t.Fatalf("invalid evaluation should be rejected before projection update: %+v", rejected)
+	}
+
+	evaluation := orchestrator.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "task_evaluation",
+		ParentTips: fork.Lane.Heads,
+		NodeID:     orchestrator.nodeID,
+		ActorID:    orchestrator.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-06T01:13:30.000Z",
+		Payload: map[string]any{
+			"intentBlockId":                  intent.BlockID,
+			"resultBlockIds":                 []any{resultA.BlockID, resultB.BlockID},
+			"recommendedWinnerResultBlockId": resultB.BlockID,
+			"confidence":                     "high",
+			"scores": []any{
+				map[string]any{
+					"resultBlockId": resultA.BlockID,
+					"totalScore":    72.0,
+					"criteria": []any{
+						map[string]any{
+							"name":      "ux_quality",
+							"score":     6.0,
+							"rationale": "The operator path is less clear.",
+						},
+					},
+				},
+				map[string]any{
+					"resultBlockId": resultB.BlockID,
+					"totalScore":    91.0,
+					"criteria": []any{
+						map[string]any{
+							"name":      "ux_quality",
+							"score":     9.0,
+							"rationale": "The winner reason is explicit.",
+						},
+					},
+				},
+			},
+			"requiredChecks": []any{
+				map[string]any{"name": "use_cases_pass", "passed": true, "evidence": []any{"UC-001 passed"}},
+			},
+			"useCases": []any{
+				map[string]any{"id": "UC-001", "passed": true, "evidence": []any{"recommendation is visible"}},
+			},
+			"risks":                  []any{"Human override was not exercised."},
+			"autoAdjudicateEligible": false,
+			"summary":                "Recommended result B with UX evidence.",
+		},
+	})
+	evaluated, err := store.AppendBlock(ctx, evaluation, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evaluated.Accepted || len(evaluated.Lane.Heads) != 1 || evaluated.Lane.Heads[0] != evaluation.BlockID {
+		t.Fatalf("evaluation did not merge candidate heads: %+v", evaluated)
+	}
+
 	adjudication := orchestrator.signBlock(t, TaskBlock{
 		Version:    TaskBlockVersion,
 		ProjectID:  ref.ProjectID,
 		TaskID:     ref.TaskID,
 		LaneID:     ref.LaneID,
 		Kind:       "task_adjudication",
-		ParentTips: fork.Lane.Heads,
+		ParentTips: evaluated.Lane.Heads,
 		NodeID:     orchestrator.nodeID,
 		ActorID:    orchestrator.actorID,
 		LeaseEpoch: 0,
@@ -583,4 +725,44 @@ func sameStringSet(left []string, right []string) bool {
 		}
 	}
 	return true
+}
+
+func sqliteColumnExists(t *testing.T, db *sql.DB, table string, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return false
+}
+
+func sqliteIndexExists(t *testing.T, db *sql.DB, indexName string) bool {
+	t.Helper()
+	var name string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, indexName).Scan(&name)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return name == indexName
 }

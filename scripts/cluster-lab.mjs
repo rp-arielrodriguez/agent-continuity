@@ -234,9 +234,29 @@ try {
 
     const winner = dashboard.results.find((result) => result.payload.workerId === "worker-b-codex");
     assert(winner, "expected worker-b result to be available for adjudication");
-    await schedulerAdjudicate("orchestrator", taskId, {
+    const evaluation = await schedulerEvaluate("orchestrator", taskId, {
       intentBlockId: dashboard.intents[0].blockId,
       resultBlockIds: dashboard.results.map((result) => result.blockId),
+      recommendedWinnerResultBlockId: winner.blockId,
+      confidence: "high",
+      requiredChecks: [
+        { name: "tests_pass", passed: true, evidence: ["cluster command runners exited 0"] },
+        { name: "use_cases_pass", passed: true, evidence: ["both candidate outputs are visible"] },
+      ],
+      useCases: [
+        { id: "UC-001", passed: true, evidence: ["dashboard records recommended winner"] },
+      ],
+      summary: "Recommended worker-b speculative output with UX evidence.",
+    });
+    assertEqual(evaluation.block.payload.recommendedWinnerResultBlockId, winner.blockId, "evaluation should recommend worker-b");
+    const evaluated = await schedulerDashboard("orchestrator", taskId);
+    assertEqual(evaluated.heads.length, 1, "evaluation should merge candidate heads into an evidence head");
+    assertEqual(evaluated.counts.needs_adjudication, 1, "evaluated speculative task should still need adjudication");
+    assertEqual(evaluated.intents[0].latestEvaluation.payload.confidence, "high", "dashboard should expose latest evaluation confidence");
+
+    await schedulerAdjudicate("orchestrator", taskId, {
+      intentBlockId: evaluated.intents[0].blockId,
+      resultBlockIds: evaluated.results.map((result) => result.blockId),
       winnerResultBlockId: winner.blockId,
       summary: "Selected worker-b speculative output.",
     });
@@ -392,6 +412,33 @@ async function schedulerAdjudicate(nodeName, taskId, input) {
     input.resultBlockIds.join(","),
     "--winner-result-block-id",
     input.winnerResultBlockId,
+    "--summary",
+    input.summary,
+    "--json",
+  ]);
+}
+
+async function schedulerEvaluate(nodeName, taskId, input) {
+  return jsonContinuity(nodeName, [
+    "scheduler-evaluate",
+    "--project-id",
+    projectId,
+    "--task-id",
+    taskId,
+    "--lane-id",
+    "scheduler",
+    "--intent-block-id",
+    input.intentBlockId,
+    "--result-block-ids",
+    input.resultBlockIds.join(","),
+    "--recommended-winner-result-block-id",
+    input.recommendedWinnerResultBlockId,
+    "--confidence",
+    input.confidence,
+    "--required-checks-json",
+    JSON.stringify(input.requiredChecks),
+    "--use-cases-json",
+    JSON.stringify(input.useCases),
     "--summary",
     input.summary,
     "--json",

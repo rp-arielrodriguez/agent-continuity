@@ -144,6 +144,16 @@ async function runSpeculativeCompetition(agents, env) {
     instructions: proofInstructions(proofFile, proofContent),
     policy: "speculative",
     tools: "shell,git",
+    evaluationMode: "agent",
+    evaluationRequiredChecks: "tests_pass,use_cases_pass",
+    evaluationRubric: [
+      { name: "correctness", weight: 0.4 },
+      { name: "ux_quality", weight: 0.4 },
+      { name: "scope_control", weight: 0.2 },
+    ],
+    evaluationUseCases: [
+      { id: "UC-001", title: "Evaluator recommendation is visible before adjudication", mustPass: true },
+    ],
   });
 
   const outputs = await Promise.all(
@@ -161,14 +171,14 @@ async function runSpeculativeCompetition(agents, env) {
 
   const beforeAdjudication = await schedulerDashboard(env, taskId);
   assertEqual(beforeAdjudication.results.length, agents.length, "speculative task should keep one result per real agent");
-  assertEqual(beforeAdjudication.counts.completed, 1, "speculative dashboard should mark the task completed once");
+  assertEqual(beforeAdjudication.counts.needs_adjudication, 1, "speculative dashboard should require adjudication before a winner is selected");
 
   const proof = await verifyProofFiles(proofFile, proofContent, agents.length);
   const winner = beforeAdjudication.results.find((result) => result.payload.workerId === `competition-${agents[0]}`);
   assert(winner, "expected first selected agent result to exist for adjudication");
 
   await run([
-    "scheduler-adjudicate",
+    "scheduler-evaluate",
     "--socket",
     paths.socket,
     "--state-dir",
@@ -183,6 +193,44 @@ async function runSpeculativeCompetition(agents, env) {
     beforeAdjudication.intents[0].blockId,
     "--result-block-ids",
     beforeAdjudication.results.map((result) => result.blockId).join(","),
+    "--recommended-winner-result-block-id",
+    winner.blockId,
+    "--confidence",
+    "high",
+    "--required-checks-json",
+    JSON.stringify([
+      { name: "tests_pass", passed: true, evidence: ["real agent proof files verified"] },
+      { name: "use_cases_pass", passed: true, evidence: ["recommendation is visible before adjudication"] },
+    ]),
+    "--use-cases-json",
+    JSON.stringify([
+      { id: "UC-001", passed: true, evidence: ["latestEvaluation is present on dashboard"] },
+    ]),
+    "--summary",
+    `Recommended ${winner.payload.workerId} as real-agent competition winner.`,
+    "--json",
+  ], { env });
+
+  const afterEvaluation = await schedulerDashboard(env, taskId);
+  assertEqual(afterEvaluation.counts.needs_adjudication, 1, "evaluation should not replace final adjudication");
+  assertEqual(afterEvaluation.intents[0].latestEvaluation.payload.recommendedWinnerResultBlockId, winner.blockId, "evaluation should recommend selected winner");
+
+  await run([
+    "scheduler-adjudicate",
+    "--socket",
+    paths.socket,
+    "--state-dir",
+    paths.stateDir,
+    "--project-id",
+    projectId,
+    "--task-id",
+    taskId,
+    "--lane-id",
+    laneId,
+    "--intent-block-id",
+    afterEvaluation.intents[0].blockId,
+    "--result-block-ids",
+    afterEvaluation.results.map((result) => result.blockId).join(","),
     "--winner-result-block-id",
     winner.blockId,
     "--summary",
@@ -201,6 +249,7 @@ async function runSpeculativeCompetition(agents, env) {
     taskId,
     winnerResultBlockId: winner.blockId,
     resultBlockIds: beforeAdjudication.results.map((result) => result.blockId),
+    evaluationBlockId: afterEvaluation.intents[0].latestEvaluation.blockId,
     proofFiles: proof.map((entry) => entry.relativeWorktreeFile),
   };
 }
@@ -233,6 +282,10 @@ async function submitTask(input) {
   if (input.agents) args.push("--requires-agents", input.agents);
   if (input.modelFamilies) args.push("--requires-model-families", input.modelFamilies);
   if (input.tools) args.push("--requires-tools", input.tools);
+  if (input.evaluationMode) args.push("--evaluation-mode", input.evaluationMode);
+  if (input.evaluationRequiredChecks) args.push("--evaluation-required-checks", input.evaluationRequiredChecks);
+  if (input.evaluationRubric) args.push("--evaluation-rubric-json", JSON.stringify(input.evaluationRubric));
+  if (input.evaluationUseCases) args.push("--evaluation-use-cases-json", JSON.stringify(input.evaluationUseCases));
   return JSON.parse((await run(args, { env: input.env })).stdout);
 }
 

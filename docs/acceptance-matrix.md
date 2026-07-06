@@ -84,6 +84,7 @@ behavior is untested.
 | AC-SCHED-004 | scheduler | Speculative scheduling keeps competing forked results and adjudication collapses heads | `test/scheduler.test.ts` | N/A | N/A | `npm run test:cluster` | physical speculative/adjudication smoke |
 | AC-SCHED-005 | scheduler | Agent/model/tool capabilities route work to eligible Codex/Claude/OpenCode profiles | `test/scheduler.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical mixed-agent smoke |
 | AC-SCHED-006 | scheduler | Project allowlist, command allowlist, and runner timeout gate execution | `test/scheduler.test.ts`, `test/agent-harness.test.ts` | N/A | `npm run test:acceptance` | `npm run test:cluster` | physical runner safety smoke |
+| AC-SCHED-007 | scheduler | Evaluator contracts record rubric scores, UX use-case evidence, risks, and recommendations before adjudication | `test/block.test.ts`, `test/scheduler.test.ts`, `test/local-store.test.ts`, `daemon/internal/continuityd/store_test.go` | CLI `scheduler-evaluate` smoke | N/A | `npm run test:cluster` evaluator lane smoke | physical evaluator/adjudication smoke |
 | AC-TMUX-001 | operator UI | Worker loops can be started, tailed, attached, and stopped through tmux commands | `test/scheduler.test.ts` for loop core | CLI tmux smoke when `tmux` exists | install `--start-worker` smoke | container tmux smoke if image has tmux | physical tmux attach smoke |
 | AC-REAL-AGENTS-001 | real agents | Codex, Claude, and OpenCode execute scheduler tasks and leave verified filesystem proof | N/A | `npm run test:real-agents` | `npm run test:real-agents` | N/A | physical agent CLI auth required |
 
@@ -122,6 +123,7 @@ OpenCode CLIs. It validates:
 - each agent completes an exclusive scheduler task through `scheduler-worker-loop`
 - each agent produces a verified proof file in its isolated worktree
 - a speculative task can collect real results from all three agents
+- evaluator contracts can preserve UX/use-case evidence before winner selection
 - `scheduler-adjudicate` records a winning result and collapses scheduler heads
 
 ## Cross-Machine Acceptance

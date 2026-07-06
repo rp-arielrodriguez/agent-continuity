@@ -38,6 +38,7 @@ import {
   renderSchedulerDashboard,
   runSchedulerOnce,
   submitTaskAdjudication,
+  submitTaskEvaluation,
   submitTaskIntent,
   submitTaskResult,
   type SchedulerRunner,
@@ -56,7 +57,7 @@ import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
-import type { LaneSnapshotPayload, TaskAdjudicationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
+import type { LaneSnapshotPayload, TaskAdjudicationPayload, TaskEvaluationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
 
 interface ParsedArgs {
   command: string;
@@ -484,6 +485,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
           policy: schedulerPolicyOption(parsed),
           priority: numberOption(parsed, "priority"),
           requirements: schedulerRequirementsOption(parsed),
+          evaluation: schedulerEvaluationSpecOption(parsed),
           idempotencyKey: stringOption(parsed, "idempotency-key"),
         },
       });
@@ -629,6 +631,50 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         console.log(`status: ${block.payload.status}`);
         console.log(`result: ${block.blockId}`);
         console.log(`summary: ${block.payload.summary}`);
+      }
+      return;
+    }
+    case "scheduler-evaluate": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await schedulerLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "scheduler-evaluator-cli");
+      const status = await provider.status(ref);
+      const resultBlockIds = listOption(parsed, "result-block-ids");
+      const recommendedWinnerResultBlockId = stringOption(parsed, "recommended-winner-result-block-id");
+      if (resultBlockIds.length === 0) throw new Error("--result-block-ids is required");
+      if (recommendedWinnerResultBlockId && !resultBlockIds.includes(recommendedWinnerResultBlockId)) {
+        throw new Error("--recommended-winner-result-block-id must be one of --result-block-ids");
+      }
+      const parentTips = listOption(parsed, "parent-tips");
+      const block = await submitTaskEvaluation({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        parentTips: parentTips.length > 0 ? parentTips : status.lane.heads ?? (status.lane.tip ? [status.lane.tip] : []),
+        createdAt: stringOption(parsed, "now"),
+        payload: {
+          intentBlockId: requiredOption(parsed, "intent-block-id"),
+          resultBlockIds,
+          recommendedWinnerResultBlockId,
+          confidence: evaluationConfidenceOption(parsed, "confidence"),
+          scores: jsonOption<TaskEvaluationPayload["scores"]>(parsed, "scores-json"),
+          requiredChecks: jsonOption<TaskEvaluationPayload["requiredChecks"]>(parsed, "required-checks-json"),
+          useCases: jsonOption<TaskEvaluationPayload["useCases"]>(parsed, "use-cases-json"),
+          risks: listOrUndefined(parsed, "risks"),
+          autoAdjudicateEligible: parsed.options["auto-adjudicate-eligible"] === true ? true : undefined,
+          summary: requiredOption(parsed, "summary"),
+        } satisfies TaskEvaluationPayload,
+      });
+      const output = { block, headsBefore: status.lane.heads ?? (status.lane.tip ? [status.lane.tip] : []), keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else {
+        console.log(`evaluation: ${block.blockId}`);
+        console.log(`intent: ${block.payload.intentBlockId}`);
+        if (block.payload.recommendedWinnerResultBlockId) console.log(`recommended: ${block.payload.recommendedWinnerResultBlockId}`);
+        if (block.payload.confidence) console.log(`confidence: ${block.payload.confidence}`);
+        console.log(`results: ${block.payload.resultBlockIds.join(",")}`);
+        console.log(`summary: ${block.payload.summary}`);
+        console.log(`tip: ${block.blockId}`);
       }
       return;
     }
@@ -1429,6 +1475,16 @@ function listOptions(parsed: ParsedArgs, ...names: string[]): string[] {
   return [...new Set(names.flatMap((name) => listOption(parsed, name)))];
 }
 
+function jsonOption<T>(parsed: ParsedArgs, name: string): T | undefined {
+  const value = stringOption(parsed, name);
+  if (value === undefined) return undefined;
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    throw new Error(`--${name} must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 function discoveryProviders(parsed: ParsedArgs): OverlayDiscoveryProvider[] {
   const providers = listOption(parsed, "providers");
   for (const provider of providers) {
@@ -1685,6 +1741,32 @@ function schedulerRequirementsOption(parsed: ParsedArgs): TaskIntentPayload["req
   return Object.values(requirements).some(Boolean) ? requirements : undefined;
 }
 
+function schedulerEvaluationSpecOption(parsed: ParsedArgs): TaskIntentPayload["evaluation"] | undefined {
+  const evaluation = {
+    mode: evaluationModeOption(parsed),
+    autoAdjudicate: parsed.options["auto-adjudicate"] === true ? true : undefined,
+    confidenceThreshold: evaluationConfidenceOption(parsed, "evaluation-confidence-threshold"),
+    requiredChecks: listOrUndefined(parsed, "evaluation-required-checks"),
+    rubric: jsonOption<NonNullable<TaskIntentPayload["evaluation"]>["rubric"]>(parsed, "evaluation-rubric-json"),
+    useCases: jsonOption<NonNullable<TaskIntentPayload["evaluation"]>["useCases"]>(parsed, "evaluation-use-cases-json"),
+  };
+  return Object.values(evaluation).some((value) => value !== undefined) ? evaluation : undefined;
+}
+
+function evaluationModeOption(parsed: ParsedArgs): NonNullable<TaskIntentPayload["evaluation"]>["mode"] | undefined {
+  const mode = stringOption(parsed, "evaluation-mode");
+  if (mode === undefined) return undefined;
+  if (mode === "manual" || mode === "agent" || mode === "deterministic") return mode;
+  throw new Error(`unsupported --evaluation-mode ${mode}; expected manual, agent, or deterministic`);
+}
+
+function evaluationConfidenceOption(parsed: ParsedArgs, name: string): "low" | "medium" | "high" | undefined {
+  const confidence = stringOption(parsed, name);
+  if (confidence === undefined) return undefined;
+  if (confidence === "low" || confidence === "medium" || confidence === "high") return confidence;
+  throw new Error(`unsupported --${name} ${confidence}; expected low, medium, or high`);
+}
+
 function schedulerPolicyOption(parsed: ParsedArgs): TaskIntentPayload["policy"] | undefined {
   const policy = stringOption(parsed, "policy");
   if (policy === undefined) return undefined;
@@ -1924,6 +2006,7 @@ Commands:
   scheduler-worker-stop Stop a scheduler worker tmux loop
   scheduler-worker-attach Attach to a scheduler worker tmux loop
   scheduler-result Publish a manual task result for an assignment
+  scheduler-evaluate Publish evaluator evidence for speculative candidate results
   scheduler-adjudicate Select/record a winning result and merge scheduler heads
   daemon-install Build/install the local continuityd daemon binary
   daemon-start Start continuityd from configured or default daemon paths
@@ -1989,6 +2072,7 @@ Examples:
   continuity scheduler-worker-loop --project-id PROJECT --task-id TASK --preset codex --node-id a0263 --sync --allowed-project-ids PROJECT --allowed-commands codex
   continuity scheduler-worker-start --project-id PROJECT --task-id TASK --preset codex --node-id a0263 --sync --allowed-project-ids PROJECT --allowed-commands codex
   continuity scheduler-worker-attach --worker-id a0263-codex
+  continuity scheduler-evaluate --project-id PROJECT --task-id TASK --intent-block-id INTENT --result-block-ids RESULT_A,RESULT_B --recommended-winner-result-block-id RESULT_A --confidence high --summary "A passed the UX use cases"
   continuity scheduler-adjudicate --project-id PROJECT --task-id TASK --intent-block-id INTENT --result-block-ids RESULT_A,RESULT_B --winner-result-block-id RESULT_A --summary "Selected best output"
   continuity scheduler-dashboard --project-id PROJECT --task-id TASK --sync
   continuity peer-invite-create --endpoint tcp://10.44.110.222:9987

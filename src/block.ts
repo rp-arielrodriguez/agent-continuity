@@ -23,6 +23,7 @@ export type TaskBlockKind =
   | "worker_profile"
   | "task_assignment"
   | "task_result"
+  | "task_evaluation"
   | "task_adjudication";
 
 const TASK_BLOCK_KINDS = new Set<string>([
@@ -41,6 +42,7 @@ const TASK_BLOCK_KINDS = new Set<string>([
   "worker_profile",
   "task_assignment",
   "task_result",
+  "task_evaluation",
   "task_adjudication",
 ]);
 
@@ -48,6 +50,8 @@ const CHECKPOINT_STATUSES = new Set<string>(["pending", "in_progress", "blocked"
 const TASK_POLICIES = new Set<string>(["exclusive", "speculative"]);
 const TASK_ASSIGNMENT_MODES = new Set<string>(["manual", "automatic"]);
 const TASK_RESULT_STATUSES = new Set<string>(["completed", "failed", "blocked", "cancelled"]);
+const EVALUATION_MODES = new Set<string>(["manual", "agent", "deterministic"]);
+const EVALUATION_CONFIDENCES = new Set<string>(["low", "medium", "high"]);
 
 export interface LaneRef {
   projectId: string;
@@ -94,6 +98,7 @@ export type TaskBlockPayload =
   | WorkerProfilePayload
   | TaskAssignmentPayload
   | TaskResultPayload
+  | TaskEvaluationPayload
   | TaskAdjudicationPayload;
 
 export interface BootstrapPayload {
@@ -188,6 +193,28 @@ export interface TaskIntentRequirements {
   tools?: string[];
 }
 
+export interface TaskEvaluationRubricItem {
+  name: string;
+  weight?: number;
+  description?: string;
+}
+
+export interface TaskEvaluationUseCase {
+  id: string;
+  title: string;
+  mustPass?: boolean;
+  evidence?: string[];
+}
+
+export interface TaskEvaluationSpec {
+  mode?: "manual" | "agent" | "deterministic";
+  autoAdjudicate?: boolean;
+  confidenceThreshold?: "low" | "medium" | "high";
+  requiredChecks?: string[];
+  rubric?: TaskEvaluationRubricItem[];
+  useCases?: TaskEvaluationUseCase[];
+}
+
 export interface TaskIntentPayload {
   title: string;
   instructions: string;
@@ -195,6 +222,7 @@ export interface TaskIntentPayload {
   policy?: "exclusive" | "speculative";
   priority?: number;
   requirements?: TaskIntentRequirements;
+  evaluation?: TaskEvaluationSpec;
   idempotencyKey?: string;
 }
 
@@ -229,6 +257,44 @@ export interface TaskResultPayload {
   startedAt?: string;
   completedAt?: string;
   tmuxSession?: string;
+}
+
+export interface TaskEvaluationCriterionScore {
+  name: string;
+  score?: number;
+  rationale?: string;
+}
+
+export interface TaskEvaluationScore {
+  resultBlockId: string;
+  totalScore?: number;
+  criteria?: TaskEvaluationCriterionScore[];
+}
+
+export interface TaskEvaluationCheck {
+  name: string;
+  passed: boolean;
+  evidence?: string[];
+}
+
+export interface TaskEvaluationUseCaseResult {
+  id: string;
+  passed: boolean;
+  evidence?: string[];
+  notes?: string;
+}
+
+export interface TaskEvaluationPayload {
+  intentBlockId: string;
+  resultBlockIds: string[];
+  recommendedWinnerResultBlockId?: string;
+  confidence?: "low" | "medium" | "high";
+  scores?: TaskEvaluationScore[];
+  requiredChecks?: TaskEvaluationCheck[];
+  useCases?: TaskEvaluationUseCaseResult[];
+  risks?: string[];
+  autoAdjudicateEligible?: boolean;
+  summary: string;
 }
 
 export interface TaskAdjudicationPayload {
@@ -535,6 +601,7 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalEnum(payload, "policy", TASK_POLICIES, issues);
       optionalInteger(payload, "priority", issues);
       optionalRequirements(payload, issues);
+      optionalEvaluationSpec(payload, issues);
       optionalString(payload, "idempotencyKey", issues);
       break;
     case "worker_profile":
@@ -570,6 +637,25 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalTimestamp(payload, "completedAt", issues);
       optionalString(payload, "tmuxSession", issues);
       break;
+    case "task_evaluation": {
+      const evaluation = payload as TaskEvaluationPayload;
+      requireBlockId(payload, "intentBlockId", issues);
+      if (!Array.isArray(evaluation.resultBlockIds) || evaluation.resultBlockIds.length === 0 || evaluation.resultBlockIds.some((blockId) => !isBlockId(blockId))) {
+        issues.push(issue("invalid_kind_payload", "task_evaluation resultBlockIds must contain at least one valid block id"));
+      }
+      optionalBlockId(payload, "recommendedWinnerResultBlockId", issues);
+      if (evaluation.recommendedWinnerResultBlockId && Array.isArray(evaluation.resultBlockIds) && !evaluation.resultBlockIds.includes(evaluation.recommendedWinnerResultBlockId)) {
+        issues.push(issue("invalid_kind_payload", "recommendedWinnerResultBlockId must be one of resultBlockIds"));
+      }
+      optionalEnum(payload, "confidence", EVALUATION_CONFIDENCES, issues);
+      optionalEvaluationScores(payload, issues, Array.isArray(evaluation.resultBlockIds) ? evaluation.resultBlockIds : undefined);
+      optionalEvaluationChecks(payload, "requiredChecks", issues);
+      optionalEvaluationUseCaseResults(payload, issues);
+      optionalStringArray(payload, "risks", issues);
+      optionalBoolean(payload, "autoAdjudicateEligible", issues);
+      requireString(payload, "summary", issues);
+      break;
+    }
     case "task_adjudication":
       requireBlockId(payload, "intentBlockId", issues);
       if (!Array.isArray((payload as TaskAdjudicationPayload).resultBlockIds) || (payload as TaskAdjudicationPayload).resultBlockIds.length === 0 || (payload as TaskAdjudicationPayload).resultBlockIds.some((blockId) => !isBlockId(blockId))) {
@@ -672,6 +758,13 @@ function optionalInteger(payload: TaskBlockPayload, field: string, issues: Block
   }
 }
 
+function optionalNumber(payload: Record<string, unknown>, field: string, issues: BlockValidationIssue[], prefix = ""): void {
+  const value = payload[field];
+  if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+    issues.push(issue("invalid_kind_payload", `${prefix}${field} must be a non-negative number when provided`));
+  }
+}
+
 function optionalEnum(payload: TaskBlockPayload, field: string, allowed: Set<string>, issues: BlockValidationIssue[]): void {
   const value = (payload as Record<string, unknown>)[field];
   if (value !== undefined && (typeof value !== "string" || !allowed.has(value))) {
@@ -691,6 +784,141 @@ function optionalRequirements(payload: TaskBlockPayload, issues: BlockValidation
   optionalStringArray(requirements, "modelFamilies", issues);
   optionalStringArray(requirements, "models", issues);
   optionalStringArray(requirements, "tools", issues);
+}
+
+function optionalEvaluationSpec(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).evaluation;
+  if (value === undefined) return;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    issues.push(issue("invalid_kind_payload", "evaluation must be an object when provided"));
+    return;
+  }
+  const evaluation = value as Record<string, unknown>;
+  optionalEnum(evaluation as TaskBlockPayload, "mode", EVALUATION_MODES, issues);
+  optionalBoolean(evaluation as TaskBlockPayload, "autoAdjudicate", issues);
+  optionalEnum(evaluation as TaskBlockPayload, "confidenceThreshold", EVALUATION_CONFIDENCES, issues);
+  optionalStringArray(evaluation, "requiredChecks", issues);
+  optionalEvaluationRubric(evaluation, issues);
+  optionalEvaluationUseCases(evaluation, issues);
+}
+
+function optionalEvaluationRubric(payload: Record<string, unknown>, issues: BlockValidationIssue[]): void {
+  const value = payload.rubric;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", "evaluation.rubric must be an array when provided"));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `evaluation.rubric[${index}] must be an object`));
+      continue;
+    }
+    const item = entry as Record<string, unknown>;
+    requireNestedString(item, "name", `evaluation.rubric[${index}].name`, issues);
+    optionalNumber(item, "weight", issues, `evaluation.rubric[${index}].`);
+    optionalNestedString(item, "description", `evaluation.rubric[${index}].description`, issues);
+  }
+}
+
+function optionalEvaluationUseCases(payload: Record<string, unknown>, issues: BlockValidationIssue[]): void {
+  const value = payload.useCases;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", "evaluation.useCases must be an array when provided"));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `evaluation.useCases[${index}] must be an object`));
+      continue;
+    }
+    const useCase = entry as Record<string, unknown>;
+    requireNestedString(useCase, "id", `evaluation.useCases[${index}].id`, issues);
+    requireNestedString(useCase, "title", `evaluation.useCases[${index}].title`, issues);
+    optionalNestedBoolean(useCase, "mustPass", `evaluation.useCases[${index}].mustPass`, issues);
+    optionalNestedStringArray(useCase, "evidence", `evaluation.useCases[${index}].evidence`, issues);
+  }
+}
+
+function optionalEvaluationScores(payload: TaskBlockPayload, issues: BlockValidationIssue[], candidateBlockIds?: string[]): void {
+  const value = (payload as Record<string, unknown>).scores;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", "scores must be an array when provided"));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `scores[${index}] must be an object`));
+      continue;
+    }
+    const score = entry as Record<string, unknown>;
+    requireNestedBlockId(score, "resultBlockId", `scores[${index}].resultBlockId`, issues);
+    if (typeof score.resultBlockId === "string" && candidateBlockIds && !candidateBlockIds.includes(score.resultBlockId)) {
+      issues.push(issue("invalid_kind_payload", `scores[${index}].resultBlockId must be one of resultBlockIds`));
+    }
+    optionalNumber(score, "totalScore", issues, `scores[${index}].`);
+    optionalEvaluationCriteria(score, index, issues);
+  }
+}
+
+function optionalEvaluationCriteria(score: Record<string, unknown>, scoreIndex: number, issues: BlockValidationIssue[]): void {
+  const value = score.criteria;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", `scores[${scoreIndex}].criteria must be an array when provided`));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `scores[${scoreIndex}].criteria[${index}] must be an object`));
+      continue;
+    }
+    const criterion = entry as Record<string, unknown>;
+    requireNestedString(criterion, "name", `scores[${scoreIndex}].criteria[${index}].name`, issues);
+    optionalNumber(criterion, "score", issues, `scores[${scoreIndex}].criteria[${index}].`);
+    optionalNestedString(criterion, "rationale", `scores[${scoreIndex}].criteria[${index}].rationale`, issues);
+  }
+}
+
+function optionalEvaluationChecks(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", `${field} must be an array when provided`));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `${field}[${index}] must be an object`));
+      continue;
+    }
+    const check = entry as Record<string, unknown>;
+    requireNestedString(check, "name", `${field}[${index}].name`, issues);
+    requireNestedBoolean(check, "passed", `${field}[${index}].passed`, issues);
+    optionalNestedStringArray(check, "evidence", `${field}[${index}].evidence`, issues);
+  }
+}
+
+function optionalEvaluationUseCaseResults(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).useCases;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", "useCases must be an array when provided"));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `useCases[${index}] must be an object`));
+      continue;
+    }
+    const useCase = entry as Record<string, unknown>;
+    requireNestedString(useCase, "id", `useCases[${index}].id`, issues);
+    requireNestedBoolean(useCase, "passed", `useCases[${index}].passed`, issues);
+    optionalNestedStringArray(useCase, "evidence", `useCases[${index}].evidence`, issues);
+    optionalNestedString(useCase, "notes", `useCases[${index}].notes`, issues);
+  }
 }
 
 function optionalSnapshotCheckpoint(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
@@ -748,6 +976,48 @@ function optionalTimestamp(payload: TaskBlockPayload, field: string, issues: Blo
   const value = (payload as Record<string, unknown>)[field];
   if (value !== undefined && (typeof value !== "string" || !isIsoDate(value))) {
     issues.push(issue("invalid_kind_payload", `${field} must be an ISO timestamp when provided`));
+  }
+}
+
+function requireNestedString(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (typeof value !== "string" || value.trim() === "") {
+    issues.push(issue("invalid_kind_payload", `${label} must be a non-empty string`));
+  }
+}
+
+function optionalNestedString(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (value !== undefined && typeof value !== "string") {
+    issues.push(issue("invalid_kind_payload", `${label} must be a string when provided`));
+  }
+}
+
+function requireNestedBoolean(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (typeof value !== "boolean") {
+    issues.push(issue("invalid_kind_payload", `${label} must be a boolean`));
+  }
+}
+
+function optionalNestedBoolean(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (value !== undefined && typeof value !== "boolean") {
+    issues.push(issue("invalid_kind_payload", `${label} must be a boolean when provided`));
+  }
+}
+
+function optionalNestedStringArray(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (value !== undefined && (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry.trim() === ""))) {
+    issues.push(issue("invalid_kind_payload", `${label} must contain non-empty strings when provided`));
+  }
+}
+
+function requireNestedBlockId(payload: Record<string, unknown>, key: string, label: string, issues: BlockValidationIssue[]): void {
+  const value = payload[key];
+  if (typeof value !== "string" || !isBlockId(value)) {
+    issues.push(issue("invalid_kind_payload", `${label} must be a valid block id`));
   }
 }
 

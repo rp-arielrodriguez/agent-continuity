@@ -205,6 +205,33 @@ func optionalPayloadInteger(payload map[string]any, field string) error {
 	return nil
 }
 
+func optionalPayloadNumber(payload map[string]any, field string) error {
+	value, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	number, ok := value.(float64)
+	if !ok {
+		if number, ok := value.(int); ok {
+			if number < 0 {
+				return errors.New(field + " must be a non-negative number when provided")
+			}
+			return nil
+		}
+		if number, ok := value.(int64); ok {
+			if number < 0 {
+				return errors.New(field + " must be a non-negative number when provided")
+			}
+			return nil
+		}
+		return errors.New(field + " must be a non-negative number when provided")
+	}
+	if number < 0 {
+		return errors.New(field + " must be a non-negative number when provided")
+	}
+	return nil
+}
+
 func optionalPayloadBool(payload map[string]any, field string) error {
 	value, ok := payload[field]
 	if !ok {
@@ -222,6 +249,22 @@ func requiredPayloadBlockID(payload map[string]any, field string) error {
 		return errors.New(field + " must be a valid block id")
 	}
 	return nil
+}
+
+func requiredPayloadBlockIDSlice(payload map[string]any, field string) ([]string, error) {
+	values, ok := payload[field].([]any)
+	if !ok || len(values) == 0 {
+		return nil, errors.New(field + " must be a non-empty array")
+	}
+	output := make([]string, 0, len(values))
+	for _, value := range values {
+		text, ok := value.(string)
+		if !ok || !validBlockID(text) {
+			return nil, errors.New(field + " must contain valid block ids")
+		}
+		output = append(output, text)
+	}
+	return output, nil
 }
 
 func optionalPayloadBlockID(payload map[string]any, field string) error {
@@ -256,6 +299,221 @@ func optionalTaskRequirements(payload map[string]any) error {
 	for _, field := range []string{"agents", "modelFamilies", "models", "tools"} {
 		if err := optionalPayloadStringSlice(requirements, field); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationSpec(payload map[string]any) error {
+	value, ok := payload["evaluation"]
+	if !ok {
+		return nil
+	}
+	evaluation, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("evaluation must be an object when provided")
+	}
+	if mode := payloadString(evaluation, "mode"); mode != "" && !validEvaluationMode(mode) {
+		return errors.New("evaluation.mode must be one of manual, agent, deterministic")
+	}
+	if confidence := payloadString(evaluation, "confidenceThreshold"); confidence != "" && !validEvaluationConfidence(confidence) {
+		return errors.New("evaluation.confidenceThreshold must be one of low, medium, high")
+	}
+	if err := optionalPayloadBool(evaluation, "autoAdjudicate"); err != nil {
+		return errors.New("evaluation." + err.Error())
+	}
+	if err := optionalPayloadStringSlice(evaluation, "requiredChecks"); err != nil {
+		return errors.New("evaluation." + err.Error())
+	}
+	if err := optionalEvaluationRubric(evaluation); err != nil {
+		return err
+	}
+	if err := optionalEvaluationUseCases(evaluation); err != nil {
+		return err
+	}
+	return nil
+}
+
+func optionalEvaluationRubric(payload map[string]any) error {
+	values, ok := payload["rubric"]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return errors.New("evaluation.rubric must be an array when provided")
+	}
+	for index, entry := range entries {
+		item, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("evaluation.rubric[%d] must be an object", index)
+		}
+		if err := requiredPayloadString(item, "name"); err != nil {
+			return fmt.Errorf("evaluation.rubric[%d].%w", index, err)
+		}
+		if err := optionalPayloadNumber(item, "weight"); err != nil {
+			return fmt.Errorf("evaluation.rubric[%d].%w", index, err)
+		}
+		if value, ok := item["description"]; ok {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("evaluation.rubric[%d].description must be a string when provided", index)
+			}
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationUseCases(payload map[string]any) error {
+	values, ok := payload["useCases"]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return errors.New("evaluation.useCases must be an array when provided")
+	}
+	for index, entry := range entries {
+		useCase, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("evaluation.useCases[%d] must be an object", index)
+		}
+		if err := requiredPayloadString(useCase, "id"); err != nil {
+			return fmt.Errorf("evaluation.useCases[%d].%w", index, err)
+		}
+		if err := requiredPayloadString(useCase, "title"); err != nil {
+			return fmt.Errorf("evaluation.useCases[%d].%w", index, err)
+		}
+		if err := optionalPayloadBool(useCase, "mustPass"); err != nil {
+			return fmt.Errorf("evaluation.useCases[%d].%w", index, err)
+		}
+		if err := optionalPayloadStringSlice(useCase, "evidence"); err != nil {
+			return fmt.Errorf("evaluation.useCases[%d].%w", index, err)
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationScores(payload map[string]any, candidateBlockIDs []string) error {
+	values, ok := payload["scores"]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return errors.New("scores must be an array when provided")
+	}
+	for index, entry := range entries {
+		score, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("scores[%d] must be an object", index)
+		}
+		if err := requiredPayloadBlockID(score, "resultBlockId"); err != nil {
+			return fmt.Errorf("scores[%d].%w", index, err)
+		}
+		if resultBlockID := payloadString(score, "resultBlockId"); len(candidateBlockIDs) > 0 && !containsString(candidateBlockIDs, resultBlockID) {
+			return fmt.Errorf("scores[%d].resultBlockId must be one of resultBlockIds", index)
+		}
+		if err := optionalPayloadNumber(score, "totalScore"); err != nil {
+			return fmt.Errorf("scores[%d].%w", index, err)
+		}
+		if err := optionalEvaluationCriteria(score, index); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationCriteria(score map[string]any, scoreIndex int) error {
+	values, ok := score["criteria"]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return fmt.Errorf("scores[%d].criteria must be an array when provided", scoreIndex)
+	}
+	for index, entry := range entries {
+		criterion, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("scores[%d].criteria[%d] must be an object", scoreIndex, index)
+		}
+		if err := requiredPayloadString(criterion, "name"); err != nil {
+			return fmt.Errorf("scores[%d].criteria[%d].%w", scoreIndex, index, err)
+		}
+		if err := optionalPayloadNumber(criterion, "score"); err != nil {
+			return fmt.Errorf("scores[%d].criteria[%d].%w", scoreIndex, index, err)
+		}
+		if value, ok := criterion["rationale"]; ok {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("scores[%d].criteria[%d].rationale must be a string when provided", scoreIndex, index)
+			}
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationChecks(payload map[string]any, field string) error {
+	values, ok := payload[field]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return errors.New(field + " must be an array when provided")
+	}
+	for index, entry := range entries {
+		check, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s[%d] must be an object", field, index)
+		}
+		if err := requiredPayloadString(check, "name"); err != nil {
+			return fmt.Errorf("%s[%d].%w", field, index, err)
+		}
+		value, ok := check["passed"]
+		if !ok {
+			return fmt.Errorf("%s[%d].passed must be a boolean", field, index)
+		}
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("%s[%d].passed must be a boolean", field, index)
+		}
+		if err := optionalPayloadStringSlice(check, "evidence"); err != nil {
+			return fmt.Errorf("%s[%d].%w", field, index, err)
+		}
+	}
+	return nil
+}
+
+func optionalEvaluationUseCaseResults(payload map[string]any) error {
+	values, ok := payload["useCases"]
+	if !ok {
+		return nil
+	}
+	entries, ok := values.([]any)
+	if !ok {
+		return errors.New("useCases must be an array when provided")
+	}
+	for index, entry := range entries {
+		useCase, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("useCases[%d] must be an object", index)
+		}
+		if err := requiredPayloadString(useCase, "id"); err != nil {
+			return fmt.Errorf("useCases[%d].%w", index, err)
+		}
+		value, ok := useCase["passed"]
+		if !ok {
+			return fmt.Errorf("useCases[%d].passed must be a boolean", index)
+		}
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("useCases[%d].passed must be a boolean", index)
+		}
+		if err := optionalPayloadStringSlice(useCase, "evidence"); err != nil {
+			return fmt.Errorf("useCases[%d].%w", index, err)
+		}
+		if value, ok := useCase["notes"]; ok {
+			if _, ok := value.(string); !ok {
+				return fmt.Errorf("useCases[%d].notes must be a string when provided", index)
+			}
 		}
 	}
 	return nil
@@ -436,6 +694,9 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 		if err := optionalTaskRequirements(payload); err != nil {
 			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 		}
+		if err := optionalEvaluationSpec(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
 	case "worker_profile":
 		if err := requiredPayloadString(payload, "workerId"); err != nil {
 			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
@@ -499,6 +760,43 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 			if err := optionalPayloadTimestamp(payload, field); err != nil {
 				issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 			}
+		}
+	case "task_evaluation":
+		if err := requiredPayloadBlockID(payload, "intentBlockId"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		resultBlockIDs, err := requiredPayloadBlockIDSlice(payload, "resultBlockIds")
+		if err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		recommended := payloadString(payload, "recommendedWinnerResultBlockId")
+		if recommended != "" {
+			if !validBlockID(recommended) {
+				issues = appendIssue(issues, "invalid_kind_payload", "recommendedWinnerResultBlockId must be a valid block id when provided")
+			} else if len(resultBlockIDs) > 0 && !containsString(resultBlockIDs, recommended) {
+				issues = appendIssue(issues, "invalid_kind_payload", "recommendedWinnerResultBlockId must be one of resultBlockIds")
+			}
+		}
+		if confidence := payloadString(payload, "confidence"); confidence != "" && !validEvaluationConfidence(confidence) {
+			issues = appendIssue(issues, "invalid_kind_payload", "confidence must be one of low, medium, high")
+		}
+		if err := optionalEvaluationScores(payload, resultBlockIDs); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalEvaluationChecks(payload, "requiredChecks"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalEvaluationUseCaseResults(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadStringSlice(payload, "risks"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalPayloadBool(payload, "autoAdjudicateEligible"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := requiredPayloadString(payload, "summary"); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 		}
 	case "task_adjudication":
 		if err := requiredPayloadBlockID(payload, "intentBlockId"); err != nil {

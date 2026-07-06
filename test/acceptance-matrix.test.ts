@@ -28,6 +28,7 @@ const requiredUseCases = [
   "AC-SCHED-004",
   "AC-SCHED-005",
   "AC-SCHED-006",
+  "AC-SCHED-007",
   "AC-TMUX-001",
   "AC-REAL-AGENTS-001",
 ];

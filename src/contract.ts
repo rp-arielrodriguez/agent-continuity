@@ -98,6 +98,7 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
     case "worker_profile":
     case "task_assignment":
     case "task_result":
+    case "task_evaluation":
     case "task_adjudication":
       return validateSchedulerBlock(block, current, block.kind);
   }
@@ -193,6 +194,7 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
     case "worker_profile":
     case "task_assignment":
     case "task_result":
+    case "task_evaluation":
     case "task_adjudication":
       break;
   }

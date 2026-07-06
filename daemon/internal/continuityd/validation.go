@@ -62,6 +62,24 @@ func validTaskResultStatus(value string) bool {
 	}
 }
 
+func validEvaluationMode(value string) bool {
+	switch value {
+	case "manual", "agent", "deterministic":
+		return true
+	default:
+		return false
+	}
+}
+
+func validEvaluationConfidence(value string) bool {
+	switch value {
+	case "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
+}
+
 func appendIssue(issues []Rejection, code string, message string) []Rejection {
 	return append(issues, Rejection{Code: code, Message: message})
 }

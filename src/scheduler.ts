@@ -10,6 +10,7 @@ import type {
   TaskAssignmentPayload,
   TaskBlock,
   TaskBlockKind,
+  TaskEvaluationPayload,
   TaskBlockPayload,
   TaskIntentPayload,
   TaskResultPayload,
@@ -22,9 +23,9 @@ const DEFAULT_ASSIGNMENT_LEASE_MS = 10 * 60 * 1000;
 const DEFAULT_RUNNER_TIMEOUT_MS = 10 * 60 * 1000;
 const OUTPUT_LIMIT = 8_000;
 
-export type SchedulerBlockKind = "task_intent" | "worker_profile" | "task_assignment" | "task_result" | "task_adjudication";
+export type SchedulerBlockKind = "task_intent" | "worker_profile" | "task_assignment" | "task_result" | "task_evaluation" | "task_adjudication";
 export type SchedulerRunner = "fake" | "command" | "tmux";
-export type SchedulerIntentStatus = "pending" | "assigned" | "completed" | "failed" | "blocked" | "cancelled";
+export type SchedulerIntentStatus = "pending" | "assigned" | "needs_adjudication" | "completed" | "failed" | "blocked" | "cancelled";
 
 export interface SchedulerWorker {
   blockId: string;
@@ -43,8 +44,10 @@ export interface SchedulerIntent {
   status: SchedulerIntentStatus;
   assignments: SchedulerAssignment[];
   results: SchedulerResult[];
+  evaluations: SchedulerEvaluation[];
   adjudications: SchedulerAdjudication[];
   latestResult?: SchedulerResult;
+  latestEvaluation?: SchedulerEvaluation;
   latestAdjudication?: SchedulerAdjudication;
 }
 
@@ -64,6 +67,14 @@ export interface SchedulerResult {
   payload: TaskResultPayload;
 }
 
+export interface SchedulerEvaluation {
+  blockId: string;
+  createdAt: string;
+  nodeId: string;
+  actorId: string;
+  payload: TaskEvaluationPayload;
+}
+
 export interface SchedulerAdjudication {
   blockId: string;
   createdAt: string;
@@ -79,6 +90,7 @@ export interface SchedulerState extends LaneRef {
   intents: SchedulerIntent[];
   assignments: SchedulerAssignment[];
   results: SchedulerResult[];
+  evaluations: SchedulerEvaluation[];
   adjudications: SchedulerAdjudication[];
   counts: Record<SchedulerIntentStatus, number>;
 }
@@ -136,6 +148,7 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
   const rawIntents: SchedulerIntent[] = [];
   const assignments: SchedulerAssignment[] = [];
   const results: SchedulerResult[] = [];
+  const evaluations: SchedulerEvaluation[] = [];
   const adjudications: SchedulerAdjudication[] = [];
 
   for (const block of blocks) {
@@ -158,6 +171,7 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
         status: "pending",
         assignments: [],
         results: [],
+        evaluations: [],
         adjudications: [],
       });
     } else if (block.kind === "task_assignment") {
@@ -176,6 +190,14 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
         actorId: block.actorId,
         payload: block.payload as TaskResultPayload,
       });
+    } else if (block.kind === "task_evaluation") {
+      evaluations.push({
+        blockId: block.blockId,
+        createdAt: block.createdAt,
+        nodeId: block.nodeId,
+        actorId: block.actorId,
+        payload: block.payload as TaskEvaluationPayload,
+      });
     } else if (block.kind === "task_adjudication") {
       adjudications.push({
         blockId: block.blockId,
@@ -189,30 +211,36 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
 
   const assignmentsByIntent = groupBy(assignments, (assignment) => assignment.payload.intentBlockId);
   const resultsByIntent = groupBy(results, (result) => result.payload.intentBlockId);
+  const evaluationsByIntent = groupBy(evaluations, (evaluation) => evaluation.payload.intentBlockId);
   const adjudicationsByIntent = groupBy(adjudications, (adjudication) => adjudication.payload.intentBlockId);
   const intents = rawIntents.map((intent) => {
     const intentAssignments = assignmentsByIntent.get(intent.blockId) ?? [];
     const intentResults = resultsByIntent.get(intent.blockId) ?? [];
+    const intentEvaluations = evaluationsByIntent.get(intent.blockId) ?? [];
     const intentAdjudications = adjudicationsByIntent.get(intent.blockId) ?? [];
     const latestResult = intentResults.at(-1);
+    const latestEvaluation = intentEvaluations.at(-1);
     const latestAdjudication = intentAdjudications.at(-1);
     const winner = latestAdjudication?.payload.winnerResultBlockId
       ? intentResults.find((result) => result.blockId === latestAdjudication.payload.winnerResultBlockId)
       : undefined;
-    const status: SchedulerIntentStatus = winner?.payload.status ?? latestResult?.payload.status ?? (intentAssignments.length > 0 ? "assigned" : "pending");
+    const status = deriveIntentStatus(intent.payload, intentAssignments, intentResults, latestEvaluation, latestAdjudication, winner);
     return {
       ...intent,
       status,
       assignments: intentAssignments,
       results: intentResults,
+      evaluations: intentEvaluations,
       adjudications: intentAdjudications,
       latestResult,
+      latestEvaluation,
       latestAdjudication,
     };
   });
   const counts = {
     pending: 0,
     assigned: 0,
+    needs_adjudication: 0,
     completed: 0,
     failed: 0,
     blocked: 0,
@@ -228,6 +256,7 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
     intents,
     assignments,
     results,
+    evaluations,
     adjudications,
     counts,
   };
@@ -235,6 +264,22 @@ export function deriveSchedulerState(ref: LaneRef, blocks: TaskBlock[], tip?: st
 
 export async function registerWorkerProfile(input: Omit<SchedulerSubmitInput<WorkerProfilePayload>, "kind">): Promise<TaskBlock<WorkerProfilePayload>> {
   return appendSchedulerBlock({ ...input, kind: "worker_profile" });
+}
+
+function deriveIntentStatus(
+  intent: TaskIntentPayload,
+  assignments: SchedulerAssignment[],
+  results: SchedulerResult[],
+  latestEvaluation: SchedulerEvaluation | undefined,
+  latestAdjudication: SchedulerAdjudication | undefined,
+  winner: SchedulerResult | undefined,
+): SchedulerIntentStatus {
+  if (winner) return winner.payload.status;
+  if (latestAdjudication) return latestAdjudication.payload.winnerResultBlockId ? "completed" : "needs_adjudication";
+  if (latestEvaluation) return "needs_adjudication";
+  if ((intent.policy ?? "exclusive") === "speculative" && results.length > 1) return "needs_adjudication";
+  const latestResult = results.at(-1);
+  return latestResult?.payload.status ?? (assignments.length > 0 ? "assigned" : "pending");
 }
 
 export async function submitTaskIntent(input: Omit<SchedulerSubmitInput<TaskIntentPayload>, "kind">): Promise<TaskBlock<TaskIntentPayload>> {
@@ -247,6 +292,10 @@ export async function submitTaskAssignment(input: Omit<SchedulerSubmitInput<Task
 
 export async function submitTaskResult(input: Omit<SchedulerSubmitInput<TaskResultPayload>, "kind">): Promise<TaskBlock<TaskResultPayload>> {
   return appendSchedulerBlock({ ...input, kind: "task_result" });
+}
+
+export async function submitTaskEvaluation(input: Omit<SchedulerSubmitInput<TaskEvaluationPayload>, "kind">): Promise<TaskBlock<TaskEvaluationPayload>> {
+  return appendSchedulerBlock({ ...input, kind: "task_evaluation" });
 }
 
 export async function submitTaskAdjudication(input: Omit<SchedulerSubmitInput<TaskAdjudicationPayload>, "kind">): Promise<TaskBlock<TaskAdjudicationPayload>> {
@@ -370,7 +419,7 @@ export function renderSchedulerDashboard(state: SchedulerState): string {
   lines.push(`tip: ${state.tip ?? "<empty>"}`);
   if (state.heads && state.heads.length > 1) lines.push(`heads: ${state.heads.join(",")}`);
   lines.push(
-    `tasks: ${state.intents.length} (pending ${state.counts.pending}, assigned ${state.counts.assigned}, completed ${state.counts.completed}, failed ${state.counts.failed}, blocked ${state.counts.blocked}, cancelled ${state.counts.cancelled})`,
+    `tasks: ${state.intents.length} (pending ${state.counts.pending}, assigned ${state.counts.assigned}, needs_adjudication ${state.counts.needs_adjudication}, completed ${state.counts.completed}, failed ${state.counts.failed}, blocked ${state.counts.blocked}, cancelled ${state.counts.cancelled})`,
   );
   lines.push(`workers: ${state.workers.length}`);
   for (const worker of state.workers) {
@@ -388,10 +437,13 @@ export function renderSchedulerDashboard(state: SchedulerState): string {
   if (state.intents.length === 0) lines.push("  - none");
   for (const intent of state.intents) {
     const latest = intent.latestResult ? ` result=${intent.latestResult.payload.workerId}/${intent.latestResult.payload.status}` : "";
+    const evaluation = intent.latestEvaluation
+      ? ` evaluation=${intent.latestEvaluation.actorId}${intent.latestEvaluation.payload.confidence ? `/${intent.latestEvaluation.payload.confidence}` : ""}${intent.latestEvaluation.payload.recommendedWinnerResultBlockId ? ` recommended=${intent.latestEvaluation.payload.recommendedWinnerResultBlockId}` : ""}`
+      : "";
     const winner = intent.latestAdjudication?.payload.winnerResultBlockId ? ` winner=${intent.latestAdjudication.payload.winnerResultBlockId}` : "";
     const assignment = intent.assignments.at(-1);
     const assigned = assignment ? ` assigned=${assignment.payload.workerId}` : "";
-    lines.push(`  - ${intent.status} ${intent.blockId} ${intent.payload.title}${assigned}${latest}${winner}`);
+    lines.push(`  - ${intent.status} ${intent.blockId} ${intent.payload.title}${assigned}${latest}${evaluation}${winner}`);
   }
   return `${lines.join("\n")}\n`;
 }

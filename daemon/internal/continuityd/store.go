@@ -82,9 +82,6 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
       CREATE INDEX IF NOT EXISTS task_blocks_lane_tip_idx
         ON task_blocks(project_id, task_id, lane_id, block_id);
 
-      CREATE INDEX IF NOT EXISTS task_blocks_lane_active_sequence_idx
-        ON task_blocks(project_id, task_id, lane_id, archived_at, sequence);
-
       CREATE TABLE IF NOT EXISTS blob_objects (
         digest text PRIMARY KEY,
         size_bytes integer NOT NULL,
@@ -141,6 +138,12 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 	}
 	if err := ensureColumn(ctx, s.db, "task_blocks", "archive_reason", "text"); err != nil {
 		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+      CREATE INDEX IF NOT EXISTS task_blocks_lane_active_sequence_idx
+        ON task_blocks(project_id, task_id, lane_id, archived_at, sequence);
+    `); err != nil {
+		return fmt.Errorf("create task_blocks_lane_active_sequence_idx: %w", err)
 	}
 	return nil
 }

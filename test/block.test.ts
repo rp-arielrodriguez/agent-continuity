@@ -110,12 +110,77 @@ test("validates scheduler block payloads", async () => {
           modelFamilies: ["gpt"],
           tools: ["shell", "git"],
         },
+        evaluation: {
+          mode: "agent",
+          autoAdjudicate: false,
+          confidenceThreshold: "high",
+          requiredChecks: ["tests_pass", "ux_use_cases_pass"],
+          rubric: [
+            { name: "correctness", weight: 0.35 },
+            { name: "ux_quality", weight: 0.25, description: "Operator experience and use-case clarity." },
+          ],
+          useCases: [
+            {
+              id: "UC-001",
+              title: "User understands the selected winner",
+              mustPass: true,
+              evidence: ["dashboard shows recommendation"],
+            },
+          ],
+        },
       },
     },
     signer,
   );
 
   assert.equal(validateTaskBlock(block).ok, true);
+
+  const evaluation = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "task_evaluation",
+      leaseEpoch: 0,
+      payload: {
+        intentBlockId: block.blockId,
+        resultBlockIds: [block.blockId],
+        recommendedWinnerResultBlockId: block.blockId,
+        confidence: "high",
+        scores: [
+          {
+            resultBlockId: block.blockId,
+            totalScore: 92.5,
+            criteria: [
+              {
+                name: "ux_quality",
+                score: 9,
+                rationale: "The workflow is visible from the dashboard.",
+              },
+            ],
+          },
+        ],
+        requiredChecks: [
+          {
+            name: "ux_use_cases_pass",
+            passed: true,
+            evidence: ["UC-001 passed"],
+          },
+        ],
+        useCases: [
+          {
+            id: "UC-001",
+            passed: true,
+            evidence: ["recommendation rendered"],
+            notes: "The evaluator summary is actionable.",
+          },
+        ],
+        risks: ["Manual override was not exercised."],
+        autoAdjudicateEligible: false,
+        summary: "Recommended deterministic result.",
+      },
+    },
+    signer,
+  );
+  assert.equal(validateTaskBlock(evaluation).ok, true);
 
   const adjudication = await createSignedTaskBlock(
     {
@@ -149,6 +214,42 @@ test("validates scheduler block payloads", async () => {
       signer,
     ),
     /intentBlockId must be a valid block id/,
+  );
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "task_evaluation",
+        leaseEpoch: 0,
+        payload: {
+          intentBlockId: block.blockId,
+          resultBlockIds: [block.blockId],
+          recommendedWinnerResultBlockId: adjudication.blockId,
+          summary: "Invalid recommendation.",
+        } as never,
+      },
+      signer,
+    ),
+    /recommendedWinnerResultBlockId must be one of resultBlockIds/,
+  );
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "task_evaluation",
+        leaseEpoch: 0,
+        payload: {
+          intentBlockId: block.blockId,
+          resultBlockIds: [block.blockId],
+          scores: [{ resultBlockId: adjudication.blockId, totalScore: 1 }],
+          summary: "Invalid score target.",
+        } as never,
+      },
+      signer,
+    ),
+    /scores\[0\]\.resultBlockId must be one of resultBlockIds/,
   );
 });
 

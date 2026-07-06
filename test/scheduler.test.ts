@@ -11,11 +11,13 @@ import { resolveSchedulerWorkerProfile, schedulerWorkerPreset } from "../src/sch
 import {
   deriveSchedulerState,
   loadSchedulerState,
+  renderSchedulerDashboard,
   runSchedulerOnce,
   schedulerRunnerEnvironment,
   selectRunnableIntent,
   submitTaskAdjudication,
   submitTaskAssignment,
+  submitTaskEvaluation,
   submitTaskIntent,
   workerMatchesIntent,
 } from "../src/scheduler.js";
@@ -294,6 +296,110 @@ test("scheduler adjudication records the winning result", async () => {
   const state = await loadSchedulerState(provider, ref);
   assert.equal(state.adjudications.length, 1);
   assert.equal(state.intents[0].latestAdjudication?.payload.winnerResultBlockId, second.resultBlock.blockId);
+});
+
+test("scheduler evaluations attach rubric and use-case evidence before adjudication", async () => {
+  const provider = new MemoryProvider();
+  const signer = createEd25519Signer({ nodeId: "a0263", actorId: "scheduler-test" });
+  const intent = await submitTaskIntent({
+    ...ref,
+    provider,
+    signer,
+    createdAt: "2026-07-05T22:22:00.000Z",
+    payload: {
+      title: "Evaluate UX candidates",
+      instructions: "Compare candidate outputs against UX use cases.",
+      policy: "speculative",
+      requirements: { tools: ["shell"] },
+      evaluation: {
+        mode: "agent",
+        autoAdjudicate: false,
+        requiredChecks: ["tests_pass", "use_cases_pass"],
+        rubric: [
+          { name: "correctness", weight: 0.4 },
+          { name: "ux_quality", weight: 0.35 },
+          { name: "scope_control", weight: 0.25 },
+        ],
+        useCases: [
+          {
+            id: "UC-001",
+            title: "Operator can understand why a winner was recommended",
+            mustPass: true,
+            evidence: ["dashboard includes recommendation"],
+          },
+        ],
+      },
+    },
+  });
+
+  const first = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:23:00.000Z",
+    worker: {
+      workerId: "worker-a",
+      agent: "codex",
+      tools: ["shell"],
+    },
+  });
+  const second = await runSchedulerOnce({
+    ...ref,
+    provider,
+    signer,
+    now: "2026-07-05T22:24:00.000Z",
+    worker: {
+      workerId: "worker-b",
+      agent: "opencode",
+      tools: ["shell"],
+    },
+  });
+  assert.ok(first.resultBlock);
+  assert.ok(second.resultBlock);
+
+  const beforeEvaluation = await provider.status(ref);
+  const evaluation = await submitTaskEvaluation({
+    ...ref,
+    provider,
+    signer,
+    parentTips: beforeEvaluation.lane.heads,
+    payload: {
+      intentBlockId: intent.blockId,
+      resultBlockIds: [first.resultBlock.blockId, second.resultBlock.blockId],
+      recommendedWinnerResultBlockId: second.resultBlock.blockId,
+      confidence: "high",
+      scores: [
+        {
+          resultBlockId: first.resultBlock.blockId,
+          totalScore: 72,
+          criteria: [{ name: "ux_quality", score: 6, rationale: "The operator path is less clear." }],
+        },
+        {
+          resultBlockId: second.resultBlock.blockId,
+          totalScore: 91,
+          criteria: [{ name: "ux_quality", score: 9, rationale: "The winner reason is explicit." }],
+        },
+      ],
+      requiredChecks: [
+        { name: "tests_pass", passed: true, evidence: ["npm test passed"] },
+        { name: "use_cases_pass", passed: true, evidence: ["UC-001 passed"] },
+      ],
+      useCases: [{ id: "UC-001", passed: true, evidence: ["dashboard includes recommendation"] }],
+      risks: ["Human override was not exercised."],
+      autoAdjudicateEligible: false,
+      summary: "worker-b best satisfies the UX use case.",
+    },
+  });
+
+  const state = await loadSchedulerState(provider, ref);
+  assert.equal(state.evaluations.length, 1);
+  assert.equal(state.intents[0].status, "needs_adjudication");
+  assert.equal(state.intents[0].latestEvaluation?.blockId, evaluation.blockId);
+  assert.equal(state.intents[0].latestEvaluation?.payload.recommendedWinnerResultBlockId, second.resultBlock.blockId);
+  assert.deepEqual(state.heads, [evaluation.blockId]);
+  assert.match(renderSchedulerDashboard(state), /needs_adjudication/);
+  assert.match(renderSchedulerDashboard(state), /evaluation=scheduler-test\/high/);
+  assert.match(renderSchedulerDashboard(state), new RegExp(`recommended=${second.resultBlock.blockId}`));
 });
 
 test("command runner timeout is recorded as a failed result", async () => {

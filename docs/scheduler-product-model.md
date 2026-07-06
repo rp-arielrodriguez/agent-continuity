@@ -32,6 +32,9 @@ Current implementation:
   while allowing explicit overrides.
 - `--allowed-project-ids`, `--allowed-commands`, `--max-runner-timeout-ms`, and
   `--worktree-root` provide local safety boundaries for scheduled execution.
+- `continuity scheduler-evaluate` records evaluator evidence, rubric scores,
+  required checks, use-case results, risks, and a recommended winner before final
+  adjudication.
 - `continuity scheduler-adjudicate` records result selection and collapses
   forked scheduler heads after speculative competition.
 
@@ -126,6 +129,52 @@ lane collapses back to one head while preserving every candidate result block.
 Owned checkpoint/canon lanes remain stricter: they still extend current heads and
 use leases to avoid accidental parallel writes. Forking is intentional scheduler
 behavior, not a blanket rule for all continuity state.
+
+## Evaluator Contract
+
+Speculative competition separates candidate work, evaluator evidence, and final
+authority.
+
+```text
+task_intent(policy=speculative)
+  evaluation:
+    mode: agent
+    requiredChecks: [tests_pass, use_cases_pass]
+    rubric:
+      - correctness
+      - ux_quality
+      - scope_control
+    useCases:
+      - UC-001: operator can understand why a winner was recommended
+      - UC-002: user can override the recommendation manually
+
+task_result(worker=codex)
+task_result(worker=claude)
+task_result(worker=opencode)
+
+task_evaluation
+  resultBlockIds: [codex-result, claude-result, opencode-result]
+  recommendedWinnerResultBlockId: claude-result
+  confidence: high
+  requiredChecks:
+    - tests_pass: true
+    - use_cases_pass: true
+  useCases:
+    - UC-001: true
+    - UC-002: false
+  risks:
+    - manual override was not exercised
+
+task_adjudication
+  winnerResultBlockId: claude-result
+```
+
+`task_evaluation` is evidence, not authority. It may recommend a winner and
+merge candidate heads into an evaluation head, but the task is still
+`needs_adjudication` until a `task_adjudication` block is written. For low-risk
+deterministic work, an evaluator/orchestrator may immediately write both blocks.
+For risky code or product work, the evaluator should only recommend and a human
+or explicit orchestrator should adjudicate.
 
 ## tmux Role
 
