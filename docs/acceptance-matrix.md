@@ -165,6 +165,10 @@ These are product extensions, not currently claimed as supported acceptance:
 - key-pinning policy for changed peer public keys
 - disabled-peer revocation UX beyond the stored enabled flag
 - persisted named worker profile files
+- strict project identity resolution for daemon-backed orientation: `resume`,
+  `orient`, and session-start hooks must require an explicit or inferable project
+  id, and must fail loudly instead of falling back to stale compatibility state
+  when project inference fails outside a git checkout
 - real S3/R2/private HTTPS smoke tests outside local shims
 - richer remote orchestration that starts real Codex/Claude/OpenCode sessions on a
   second physical machine without SSH/operator intervention
