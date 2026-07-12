@@ -309,3 +309,76 @@ test("validates lane snapshot payloads", async () => {
     /baseBlockIds must contain at least one valid block id/,
   );
 });
+
+test("validates session envelope and run event payloads", async () => {
+  const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+  const envelope = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "session_envelope",
+      leaseEpoch: 1,
+      createdAt: "2026-07-12T20:00:00.000Z",
+      payload: {
+        sessionId: "codex-1",
+        cwd: "/Users/ariel.rodriguez/recarga/repos/agent-continuity",
+        recoveryCommand: "continuity resume --daemon --project-id rp-arielrodriguez/agent-continuity --task-id agent-continuity-decentralized-runtime --lane-id main",
+        relatedProjectIds: ["recarga/devex"],
+        summary: "Working on typed recovery contracts.",
+      },
+    },
+    signer,
+  );
+  assert.equal(validateTaskBlock(envelope).ok, true);
+
+  const event = await createSignedTaskBlock(
+    {
+      ...ref,
+      kind: "run_event",
+      leaseEpoch: 1,
+      createdAt: "2026-07-12T20:01:00.000Z",
+      payload: {
+        severity: "blocked",
+        category: "auth",
+        summary: "1Password signing unavailable.",
+        affects: ["git commit", "git push"],
+        needsVerification: true,
+        next: "Retry after 1Password is unlocked.",
+      },
+    },
+    signer,
+  );
+  assert.equal(validateTaskBlock(event).ok, true);
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "session_envelope",
+        leaseEpoch: 1,
+        payload: {
+          sessionId: "codex-1",
+          cwd: "/tmp/work",
+        } as never,
+      },
+      signer,
+    ),
+    /recoveryCommand must be a non-empty string/,
+  );
+
+  await assert.rejects(
+    createSignedTaskBlock(
+      {
+        ...ref,
+        kind: "run_event",
+        leaseEpoch: 1,
+        payload: {
+          severity: "urgent",
+          category: "auth",
+          summary: "Bad severity.",
+        } as never,
+      },
+      signer,
+    ),
+    /severity must be one of info, warning, blocked, error/,
+  );
+});

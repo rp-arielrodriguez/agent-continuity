@@ -57,7 +57,16 @@ import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
 import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
-import type { LaneSnapshotPayload, TaskAdjudicationPayload, TaskEvaluationPayload, TaskIntentPayload, TaskResultPayload, WorkerProfilePayload } from "./block.js";
+import type {
+  LaneSnapshotPayload,
+  RunEventPayload,
+  SessionEnvelopePayload,
+  TaskAdjudicationPayload,
+  TaskEvaluationPayload,
+  TaskIntentPayload,
+  TaskResultPayload,
+  WorkerProfilePayload,
+} from "./block.js";
 
 interface ParsedArgs {
   command: string;
@@ -394,6 +403,87 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         console.log(`owner: ${result.lane.owner ? `${result.lane.owner.nodeId}/${result.lane.owner.actorId}` : "<none>"}`);
         if (result.rejection) console.log(`rejection: ${result.rejection.code}: ${result.rejection.message}`);
       }
+      return;
+    }
+    case "session-start": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      const now = stringOption(parsed, "now");
+      if (parsed.options.sync === true) await provider.syncTrustedPeers(ref);
+      const claimed = await claimAgentLane({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        now,
+        createdAt: now,
+        leaseUntil: stringOption(parsed, "lease-until"),
+        reason: stringOption(parsed, "reason") ?? "session-start",
+      });
+      if (claimed.action !== "continue" || !laneOwnedBySigner(claimed.lane, signer.signer)) {
+        throw new Error(claimed.claim?.rejection?.message ?? claimed.bootstrap?.rejection?.message ?? "session-start could not claim lane");
+      }
+      const payload = sessionEnvelopePayload(parsed, ref);
+      const result = await provider.sessionEnvelope({
+        ...ref,
+        signer: signer.signer,
+        expectedTip: claimed.lane.tip,
+        createdAt: now,
+        payload,
+      });
+      if (!result.accepted) throw new Error(result.rejection?.message ?? "session envelope block was rejected");
+      const output = { result, envelope: result.lane.sessionEnvelope, keyPath: signer.keyPath, keyCreated: signer.created };
+      if (parsed.options.json) console.log(JSON.stringify(output, null, 2));
+      else printSessionEnvelope(result.lane);
+      return;
+    }
+    case "session-resume": {
+      const provider = localDaemonProvider(parsed, config);
+      const lane = parsed.options.last === true
+        ? await provider.latestSessionEnvelope()
+        : (await provider.status(await agentLaneRef(parsed))).lane;
+      if (!lane?.sessionEnvelope) {
+        throw new Error(parsed.options.last === true ? "no session envelope found" : `no session envelope found for ${lane?.projectId ?? "<unknown>"}/${lane?.taskId ?? "<unknown>"}/${lane?.laneId ?? "<unknown>"}`);
+      }
+      if (parsed.options.json) console.log(JSON.stringify(lane, null, 2));
+      else printSessionEnvelope(lane);
+      return;
+    }
+    case "run-event-add": {
+      const provider = localDaemonProvider(parsed, config);
+      const ref = await agentLaneRef(parsed);
+      const signer = await signerFromOptions(parsed, config, "agent-cli");
+      const now = stringOption(parsed, "now");
+      if (parsed.options.sync === true) await provider.syncTrustedPeers(ref);
+      const claimed = await claimAgentLane({
+        ...ref,
+        provider,
+        signer: signer.signer,
+        now,
+        createdAt: now,
+        leaseUntil: stringOption(parsed, "lease-until"),
+        reason: stringOption(parsed, "reason") ?? "run-event-add",
+      });
+      if (claimed.action !== "continue" || !laneOwnedBySigner(claimed.lane, signer.signer)) {
+        throw new Error(claimed.claim?.rejection?.message ?? claimed.bootstrap?.rejection?.message ?? "run-event-add could not claim lane");
+      }
+      const result = await provider.runEvent({
+        ...ref,
+        signer: signer.signer,
+        expectedTip: claimed.lane.tip,
+        createdAt: now,
+        payload: runEventPayload(parsed),
+      });
+      if (!result.accepted) throw new Error(result.rejection?.message ?? "run event block was rejected");
+      if (parsed.options.json) console.log(JSON.stringify({ result, keyPath: signer.keyPath, keyCreated: signer.created }, null, 2));
+      else printRunEvents(result.lane);
+      return;
+    }
+    case "run-event-list": {
+      const provider = localDaemonProvider(parsed, config);
+      const lane = (await provider.status(await agentLaneRef(parsed))).lane;
+      if (parsed.options.json) console.log(JSON.stringify(lane.runEvents ?? [], null, 2));
+      else printRunEvents(lane);
       return;
     }
     case "agent-run": {
@@ -811,6 +901,8 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         inventoryMarkdown: status.lane.inventoryMarkdown,
         checkpoint: status.lane.checkpoint as LaneSnapshotPayload["checkpoint"],
         owner: status.lane.owner,
+        sessionEnvelope: status.lane.sessionEnvelope,
+        runEvents: status.lane.runEvents,
       };
       const result = await provider.snapshot({
         ...ref,
@@ -1554,6 +1646,61 @@ async function agentLaneRef(parsed: ParsedArgs): Promise<{ projectId: string; ta
   };
 }
 
+function laneOwnedBySigner(lane: { owner?: { nodeId: string; actorId: string } }, signer: { nodeId: string; actorId: string }): boolean {
+  return lane.owner?.nodeId === signer.nodeId && lane.owner.actorId === signer.actorId;
+}
+
+function sessionEnvelopePayload(parsed: ParsedArgs, ref: { projectId: string; taskId: string; laneId: string }): SessionEnvelopePayload {
+  const cwd = stringOption(parsed, "cwd") ?? process.cwd();
+  return {
+    sessionId: stringOption(parsed, "session-id") ?? process.env.CONTINUITY_SESSION_ID ?? `session-${process.pid}`,
+    cwd,
+    recoveryCommand: stringOption(parsed, "recovery-command") ?? defaultRecoveryCommand(ref),
+    relatedProjectIds: listOrUndefined(parsed, "related-project-ids"),
+    summary: stringOption(parsed, "summary"),
+  };
+}
+
+function defaultRecoveryCommand(ref: { projectId: string; taskId: string; laneId: string }): string {
+  return [
+    "continuity",
+    "resume",
+    "--daemon",
+    "--project-id",
+    ref.projectId,
+    "--task-id",
+    ref.taskId,
+    "--lane-id",
+    ref.laneId,
+  ].join(" ");
+}
+
+function runEventPayload(parsed: ParsedArgs): RunEventPayload {
+  return {
+    severity: runEventSeverityOption(parsed),
+    category: runEventCategoryOption(parsed),
+    summary: requiredOption(parsed, "summary"),
+    detail: stringOption(parsed, "detail"),
+    affects: listOrUndefined(parsed, "affects"),
+    needsVerification: parsed.options["needs-verification"] === true ? true : undefined,
+    next: stringOption(parsed, "next"),
+  };
+}
+
+function runEventSeverityOption(parsed: ParsedArgs): RunEventPayload["severity"] {
+  const severity = stringOption(parsed, "severity") ?? "warning";
+  if (severity === "info" || severity === "warning" || severity === "blocked" || severity === "error") return severity;
+  throw new Error(`unsupported --severity ${severity}; expected info, warning, blocked, or error`);
+}
+
+function runEventCategoryOption(parsed: ParsedArgs): RunEventPayload["category"] {
+  const category = stringOption(parsed, "category") ?? "other";
+  if (category === "auth" || category === "disk" || category === "network" || category === "daemon" || category === "git" || category === "tool" || category === "environment" || category === "other") {
+    return category;
+  }
+  throw new Error(`unsupported --category ${category}; expected auth, disk, network, daemon, git, tool, environment, or other`);
+}
+
 async function signerFromOptions(parsed: ParsedArgs, config: ContinuityConfig, actorId: string): Promise<Awaited<ReturnType<typeof loadOrCreateNodeSigner>>> {
   const daemon = daemonRuntimeFromOptions(parsed, config);
   return loadOrCreateNodeSigner({
@@ -1735,6 +1882,38 @@ function printSchedulerWorkerLoopSummary(summary: Awaited<ReturnType<typeof runS
   console.log(`blocked: ${summary.blocked}`);
   console.log(`cancelled: ${summary.cancelled}`);
   console.log(`errors: ${summary.errors}`);
+}
+
+function printSessionEnvelope(lane: { projectId: string; taskId: string; laneId: string; sessionEnvelope?: NonNullable<Awaited<ReturnType<LocalDaemonProvider["latestSessionEnvelope"]>>>["sessionEnvelope"] }): void {
+  const envelope = lane.sessionEnvelope;
+  if (!envelope) {
+    console.log("session envelope: none");
+    return;
+  }
+  console.log(`project: ${lane.projectId}`);
+  console.log(`task: ${lane.taskId}`);
+  console.log(`lane: ${lane.laneId}`);
+  console.log(`session: ${envelope.sessionId}`);
+  console.log(`cwd: ${envelope.cwd}`);
+  console.log(`recoveryCommand: ${envelope.recoveryCommand}`);
+  if (envelope.relatedProjectIds?.length) console.log(`relatedProjects: ${envelope.relatedProjectIds.join(",")}`);
+  if (envelope.summary) console.log(`summary: ${envelope.summary}`);
+  if (envelope.blockId) console.log(`block: ${envelope.blockId}`);
+}
+
+function printRunEvents(lane: { runEvents?: NonNullable<Awaited<ReturnType<LocalDaemonProvider["latestSessionEnvelope"]>>>["runEvents"] }): void {
+  const events = lane.runEvents ?? [];
+  if (events.length === 0) {
+    console.log("run events: none");
+    return;
+  }
+  for (const event of events) {
+    const labels = [event.severity, event.category, event.needsVerification ? "needs-verification" : undefined].filter(Boolean).join(", ");
+    console.log(`${event.createdAt ?? "<unknown-time>"} ${labels}: ${event.summary}`);
+    if (event.affects?.length) console.log(`  affects: ${event.affects.join(",")}`);
+    if (event.next) console.log(`  next: ${event.next}`);
+    if (event.blockId) console.log(`  block: ${event.blockId}`);
+  }
 }
 
 async function instructionsOption(parsed: ParsedArgs): Promise<string> {
@@ -2008,6 +2187,10 @@ Commands:
   claim       Claim or initialize an interactive agent lane
   save        Agent-native shorthand for daemon checkpoint
   handoff     Release a lane or hand it to another actor
+  session-start Persist a durable session envelope with exact recovery command
+  session-resume Print the latest or selected durable session envelope
+  run-event-add Record an operational blocker/warning on the current lane
+  run-event-list List recent operational events projected on a lane
   agent-run   Orient, run a local command with continuity env, and checkpoint result
   scheduler-dashboard Render scheduler queue, workers, assignments, and results
   scheduler-task-submit Submit a task intent into a scheduler lane
@@ -2066,18 +2249,22 @@ Examples:
   continuity setup --local --daemon
   continuity doctor
   continuity checkpoint --task-id TASK --status completed --progress "Done" --next "Ship"
-  continuity checkpoint --daemon --task-id TASK --status completed --progress "Done" --next "Ship"
+  continuity checkpoint --daemon --project-id PROJECT --task-id TASK --status completed --progress "Done" --next "Ship"
   continuity import --task-id TASK --journal-file ~/.config/opencode/checkpoints/TASK.md --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity reconcile --task-id TASK --canon-file ~/.config/opencode/checkpoints/TASK.canon.md
   continuity resume --task-id TASK
-  continuity resume --daemon --task-id TASK
-  continuity resume --daemon --sync --task-id TASK
+  continuity resume --daemon --project-id PROJECT --task-id TASK
+  continuity resume --daemon --sync --project-id PROJECT --task-id TASK
   continuity status --json
   continuity dashboard --project-id PROJECT --task-id TASK --lane-id main
   continuity orient --project-id PROJECT --task-id TASK --sync
   continuity claim --project-id PROJECT --task-id TASK --reason "starting work"
   continuity save --project-id PROJECT --task-id TASK --status in_progress --progress "Implemented X" --next "Test Y"
   continuity handoff --project-id PROJECT --task-id TASK --target-actor-id claude-session-2
+  continuity session-start --project-id PROJECT --task-id TASK --session-id codex-1 --summary "Working on recovery contracts"
+  continuity session-resume --last
+  continuity run-event-add --project-id PROJECT --task-id TASK --severity blocked --category auth --summary "1Password signing unavailable" --affects "git commit,git push" --needs-verification
+  continuity run-event-list --project-id PROJECT --task-id TASK
   continuity agent-run --project-id PROJECT --task-id TASK --command 'printf ok' --allowed-commands printf
   continuity scheduler-task-submit --project-id PROJECT --task-id TASK --title "Run smoke" --instructions "Run tests" --requires-tools shell,git
   continuity scheduler-worker-register --project-id PROJECT --task-id TASK --preset codex --node-id a0263

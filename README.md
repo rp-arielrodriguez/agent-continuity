@@ -182,12 +182,16 @@ Write and resume daemon-backed continuity state:
 ```bash
 continuity checkpoint \
   --daemon \
+  --project-id rp-arielrodriguez/agent-continuity \
   --task-id agent-continuity-decentralized-runtime \
   --status completed \
   --progress "Daemon-backed checkpoint write succeeded." \
   --next "Continue from daemon canon."
 
-continuity resume --daemon --task-id agent-continuity-decentralized-runtime
+continuity resume \
+  --daemon \
+  --project-id rp-arielrodriguez/agent-continuity \
+  --task-id agent-continuity-decentralized-runtime
 ```
 
 `--project-id` is optional inside a git checkout with `remote.origin.url`; the

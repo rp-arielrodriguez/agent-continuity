@@ -100,7 +100,7 @@ func (s *Server) handleRequest(ctx context.Context, request rpcRequest, readOnly
 
 func isReadOnlyMethod(method string) bool {
 	switch method {
-	case "daemon.health", "provider.health", "lane.status", "lane.blocks", "lane.blocks.get", "lane.inventory", "project.inventory", "blob.get":
+	case "daemon.health", "provider.health", "lane.status", "lane.blocks", "lane.blocks.get", "lane.inventory", "project.inventory", "blob.get", "session.last":
 		return true
 	default:
 		return false
@@ -147,6 +147,15 @@ func (s *Server) dispatch(ctx context.Context, method string, params json.RawMes
 			return nil, rpcInvalidParams(err)
 		}
 		return s.store.Blob(ctx, input.Digest)
+	case "session.last":
+		lane, found, err := s.store.LatestSessionEnvelope(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, nil
+		}
+		return lane, nil
 	case "block.submit":
 		var input submitBlockInput
 		if err := decodeParams(params, &input); err != nil {

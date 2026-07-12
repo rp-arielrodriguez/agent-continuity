@@ -84,6 +84,65 @@ test("sqlite provider treats duplicate block ingest as idempotent", async () => 
   });
 });
 
+test("sqlite provider projects session envelopes and run events across reopen", async () => {
+  await withSqliteProvider(async (provider, file) => {
+    const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+
+    await provider.bootstrap({
+      ...ref,
+      signer,
+      payload: { summary: "Start recovery contract lane." },
+      createdAt: "2026-07-12T20:00:00.000Z",
+    });
+    const claim = await provider.claimLane({
+      ...ref,
+      signer,
+      leaseUntil: "2026-07-12T21:00:00.000Z",
+      createdAt: "2026-07-12T20:01:00.000Z",
+    });
+    const envelope = await provider.sessionEnvelope({
+      ...ref,
+      signer,
+      expectedTip: claim.block?.blockId,
+      createdAt: "2026-07-12T20:02:00.000Z",
+      payload: {
+        sessionId: "codex-1",
+        cwd: "/Users/ariel.rodriguez/recarga/repos/agent-continuity",
+        recoveryCommand: "continuity resume --daemon --project-id rp-arielrodriguez/agent-continuity --task-id agent-continuity-decentralized-runtime --lane-id main",
+        relatedProjectIds: ["recarga/devex"],
+      },
+    });
+    assert.equal(envelope.accepted, true);
+    const runEvent = await provider.runEvent({
+      ...ref,
+      signer,
+      expectedTip: envelope.block?.blockId,
+      createdAt: "2026-07-12T20:03:00.000Z",
+      payload: {
+        severity: "blocked",
+        category: "auth",
+        summary: "1Password signing unavailable.",
+        affects: ["git commit", "git push"],
+        needsVerification: true,
+      },
+    });
+    assert.equal(runEvent.accepted, true);
+    provider.close();
+
+    const reopened = SQLiteProvider.open({ file });
+    try {
+      const status = await reopened.status({ ...ref, actor: signer, now: "2026-07-12T20:04:00.000Z" });
+      assert.equal(status.lane.sessionEnvelope?.sessionId, "codex-1");
+      assert.equal(status.lane.sessionEnvelope?.relatedProjectIds?.[0], "recarga/devex");
+      assert.equal(status.lane.runEvents?.[0].severity, "blocked");
+      assert.equal(status.lane.runEvents?.[0].category, "auth");
+      assert.equal(status.lane.runEvents?.[0].needsVerification, true);
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
 test("sqlite provider rebuilds lane projections by replaying accepted blocks", async () => {
   await withSqliteProvider(async (provider) => {
     const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });

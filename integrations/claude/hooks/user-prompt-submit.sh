@@ -23,13 +23,15 @@ if [[ "$prompt" =~ ([Rr]esume|[Cc]ontinue)[[:space:]]+from[[:space:]]+([^[:space
   task_id="${task_id%.canon}"
   cat <<MSG
 AGENT CONTINUITY: resume from daemon continuity first, then use markdown only as a projection.
-Run: continuity resume --daemon --task-id $task_id
+Run: continuity resume --daemon --project-id <PROJECT-ID> --task-id $task_id
+If project id is missing and cannot be inferred from a git checkout, run: continuity session-resume --last
 Fallback if daemon is unavailable: continuity resume --task-id $task_id
 MSG
 elif [[ "$prompt" =~ checkpoint|dump[[:space:]]+context|save[[:space:]]+progress ]]; then
   cat <<'MSG'
 AGENT CONTINUITY: checkpoint through daemon continuity. Do not edit markdown checkpoint files as the authority.
-Run continuity checkpoint --daemon with --task-id, --status, --progress, --next, and --canon-file when a reconciled canon is available.
+Run continuity checkpoint --daemon with --project-id, --task-id, --status, --progress, --next, and --canon-file when a reconciled canon is available.
+For long sessions or compaction recovery, also run continuity session-start with --project-id and --task-id to persist the exact recovery command.
 Fallback if daemon is unavailable: run the same checkpoint command without --daemon for PostgreSQL compatibility.
 MSG
 fi

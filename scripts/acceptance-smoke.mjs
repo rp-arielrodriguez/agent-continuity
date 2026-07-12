@@ -511,6 +511,72 @@ try {
     ], { env });
     assertEqual(JSON.parse(release.stdout).lane.owner, undefined, "expected release to clear owner");
 
+    const session = await run([
+      "session-start",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--session-id",
+      "agent-harness-session",
+      "--cwd",
+      root,
+      "--summary",
+      "Acceptance recovery envelope.",
+      "--now",
+      "2026-07-05T21:35:00.000Z",
+      "--json",
+    ], { env });
+    const sessionResult = JSON.parse(session.stdout);
+    assertEqual(sessionResult.envelope.sessionId, "agent-harness-session", "expected session envelope to project");
+    assertIncludes(sessionResult.envelope.recoveryCommand, "--project-id");
+
+    const runEvent = await run([
+      "run-event-add",
+      "--socket",
+      source.socket,
+      "--state-dir",
+      source.stateDir,
+      "--project-id",
+      projectId,
+      "--task-id",
+      agentHarnessTaskId,
+      "--node-id",
+      "source-node",
+      "--actor-id",
+      "source-codex",
+      "--severity",
+      "blocked",
+      "--category",
+      "auth",
+      "--summary",
+      "Acceptance auth blocker.",
+      "--affects",
+      "git commit,git push",
+      "--needs-verification",
+      "--now",
+      "2026-07-05T21:36:00.000Z",
+      "--json",
+    ], { env });
+    assertEqual(JSON.parse(runEvent.stdout).result.lane.runEvents.at(-1).category, "auth", "expected run event to project");
+
+    const sessionResume = await run([
+      "session-resume",
+      "--socket",
+      source.socket,
+      "--last",
+    ], { env });
+    assertIncludes(sessionResume.stdout, "session: agent-harness-session");
+    assertIncludes(sessionResume.stdout, "recoveryCommand: continuity resume --daemon --project-id");
+
     const targetSync = await run([
       "peer-sync",
       "--socket",
@@ -545,6 +611,8 @@ try {
     ], { env });
     const orientResult = JSON.parse(orient.stdout);
     assertIncludes(orientResult.prompt, "agent-harness-acceptance-ok");
+    assertIncludes(orientResult.prompt, "recoveryCommand: continuity resume --daemon --project-id");
+    assertIncludes(orientResult.prompt, "blocked/auth: Acceptance auth blocker.");
   });
 
   await scenario("distributed scheduler task is executed on target and synced back to source", async () => {

@@ -80,6 +80,24 @@ func validEvaluationConfidence(value string) bool {
 	}
 }
 
+func validRunEventSeverity(value string) bool {
+	switch value {
+	case "info", "warning", "blocked", "error":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRunEventCategory(value string) bool {
+	switch value {
+	case "auth", "disk", "network", "daemon", "git", "tool", "environment", "other":
+		return true
+	default:
+		return false
+	}
+}
+
 func appendIssue(issues []Rejection, code string, message string) []Rejection {
 	return append(issues, Rejection{Code: code, Message: message})
 }

@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { LaneRef, TaskBlock } from "./block.js";
+import type { LaneProjection } from "./contract.js";
 import { BaseContinuityProvider, type LaneStatus, type LaneStatusInput, type ProviderHealth, type ProviderSubmitResult } from "./provider.js";
 
 export interface LocalDaemonProviderOptions {
@@ -251,6 +252,10 @@ export class LocalDaemonProvider extends BaseContinuityProvider {
 
   async blob(digest: string): Promise<BlobGetResult> {
     return this.client.call<BlobGetResult>("blob.get", { digest });
+  }
+
+  async latestSessionEnvelope(): Promise<LaneProjection | null> {
+    return this.client.call<LaneProjection | null>("session.last", {});
   }
 
   async submitBlock(block: TaskBlock, options?: { now?: string }): Promise<ProviderSubmitResult> {

@@ -572,6 +572,91 @@ func optionalSnapshotOwner(payload map[string]any) error {
 	return nil
 }
 
+func optionalSessionEnvelopeProjection(payload map[string]any) error {
+	value, ok := payload["sessionEnvelope"]
+	if !ok {
+		return nil
+	}
+	envelope, ok := value.(map[string]any)
+	if !ok {
+		return errors.New("sessionEnvelope must be an object when provided")
+	}
+	if err := validateSessionEnvelopePayload(envelope); err != nil {
+		return errors.New("sessionEnvelope." + err.Error())
+	}
+	return nil
+}
+
+func optionalRunEventProjections(payload map[string]any) error {
+	value, ok := payload["runEvents"]
+	if !ok {
+		return nil
+	}
+	events, ok := value.([]any)
+	if !ok {
+		return errors.New("runEvents must be an array when provided")
+	}
+	for index, entry := range events {
+		event, ok := entry.(map[string]any)
+		if !ok {
+			return fmt.Errorf("runEvents[%d] must be an object", index)
+		}
+		if err := validateRunEventPayload(event); err != nil {
+			return fmt.Errorf("runEvents[%d].%w", index, err)
+		}
+	}
+	return nil
+}
+
+func validateSessionEnvelopePayload(payload map[string]any) error {
+	if err := requiredPayloadString(payload, "sessionId"); err != nil {
+		return err
+	}
+	if err := requiredPayloadString(payload, "cwd"); err != nil {
+		return err
+	}
+	if err := requiredPayloadString(payload, "recoveryCommand"); err != nil {
+		return err
+	}
+	if err := optionalPayloadStringSlice(payload, "relatedProjectIds"); err != nil {
+		return err
+	}
+	if value, ok := payload["summary"]; ok {
+		if _, ok := value.(string); !ok {
+			return errors.New("summary must be a string when provided")
+		}
+	}
+	return nil
+}
+
+func validateRunEventPayload(payload map[string]any) error {
+	severity := payloadString(payload, "severity")
+	if severity == "" || !validRunEventSeverity(severity) {
+		return errors.New("severity must be one of info, warning, blocked, error")
+	}
+	category := payloadString(payload, "category")
+	if category == "" || !validRunEventCategory(category) {
+		return errors.New("category must be one of auth, disk, network, daemon, git, tool, environment, other")
+	}
+	if err := requiredPayloadString(payload, "summary"); err != nil {
+		return err
+	}
+	for _, field := range []string{"detail", "next"} {
+		if value, ok := payload[field]; ok {
+			if _, ok := value.(string); !ok {
+				return errors.New(field + " must be a string when provided")
+			}
+		}
+	}
+	if err := optionalPayloadStringSlice(payload, "affects"); err != nil {
+		return err
+	}
+	if err := optionalPayloadBool(payload, "needsVerification"); err != nil {
+		return err
+	}
+	return nil
+}
+
 func payloadIntegerValue(payload map[string]any, field string) (int64, bool) {
 	value, ok := payload[field]
 	if !ok {
@@ -676,6 +761,20 @@ func validatePayload(kind string, payload map[string]any) []Rejection {
 			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 		}
 		if err := optionalSnapshotOwner(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalSessionEnvelopeProjection(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+		if err := optionalRunEventProjections(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+	case "session_envelope":
+		if err := validateSessionEnvelopePayload(payload); err != nil {
+			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
+		}
+	case "run_event":
+		if err := validateRunEventPayload(payload); err != nil {
 			issues = appendIssue(issues, "invalid_kind_payload", err.Error())
 		}
 	case "task_intent":

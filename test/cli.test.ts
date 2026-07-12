@@ -28,6 +28,28 @@ test("database commands fail clearly before setup", async () => {
   }
 });
 
+test("daemon resume without project id fails loudly outside a git checkout", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-home-"));
+  const cwd = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-nongit-"));
+  const env = { ...process.env, CONTINUITY_HOME: home };
+  const cli = path.join(process.cwd(), "dist/src/cli.js");
+
+  try {
+    await assert.rejects(
+      execFile(process.execPath, [cli, "resume", "--daemon", "--task-id", "TARCH-175"], { cwd, env }),
+      (error: unknown) => {
+        const result = error as { stderr?: string; code?: number };
+        assert.equal(result.code, 1);
+        assert.match(result.stderr ?? "", /missing --project-id and git remote\.origin\.url could not be read/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(home, { recursive: true, force: true });
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
 test("install rejects unsupported integration targets", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-home-"));
   const env = { ...process.env, CONTINUITY_HOME: home };

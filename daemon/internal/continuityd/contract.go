@@ -7,6 +7,7 @@ import (
 )
 
 const defaultLeaseGrace = 30 * time.Second
+const maxProjectedRunEvents = 20
 
 type TransitionContext struct {
 	Current  *LaneProjection
@@ -44,7 +45,7 @@ func ValidateBlockTransition(block TaskBlock, ctx TransitionContext) TransitionR
 		return validateBootstrap(block, ctx.Current)
 	case "claim_lane":
 		return validateClaim(block, ctx)
-	case "heartbeat", "checkpoint", "canon_update", "handoff", "release":
+	case "heartbeat", "checkpoint", "canon_update", "handoff", "release", "session_envelope", "run_event":
 		return validateOwnedTipBlock(block, ctx.Current, block.Kind)
 	case "inventory_update", "pause":
 		return validateTipExtendingBlock(block, ctx.Current, block.Kind)
@@ -136,7 +137,18 @@ func ApplyBlockToProjection(current *LaneProjection, block TaskBlock) LaneProjec
 		if owner, ok := snapshotOwner(block.Payload); ok {
 			next.Owner = &owner
 		}
+		if envelope, ok := snapshotSessionEnvelope(block.Payload, block); ok {
+			next.SessionEnvelope = &envelope
+		}
+		if events, ok := snapshotRunEvents(block.Payload); ok {
+			next.RunEvents = trimRunEvents(events)
+		}
 		next.Heads = []string{block.BlockID}
+	case "session_envelope":
+		envelope := sessionEnvelopeProjection(block.Payload, block)
+		next.SessionEnvelope = &envelope
+	case "run_event":
+		next.RunEvents = trimRunEvents(append(next.RunEvents, runEventProjection(block.Payload, block)))
 	}
 	return next
 }
@@ -271,6 +283,77 @@ func snapshotOwner(payload map[string]any) (LaneOwner, bool) {
 		LeaseEpoch: leaseEpoch,
 		LeaseUntil: payloadString(value, "leaseUntil"),
 	}, true
+}
+
+func snapshotSessionEnvelope(payload map[string]any, block TaskBlock) (SessionEnvelopeProjection, bool) {
+	value, ok := payload["sessionEnvelope"].(map[string]any)
+	if !ok {
+		return SessionEnvelopeProjection{}, false
+	}
+	return sessionEnvelopeProjection(value, block), true
+}
+
+func snapshotRunEvents(payload map[string]any) ([]RunEventProjection, bool) {
+	values, ok := payload["runEvents"].([]any)
+	if !ok {
+		return nil, false
+	}
+	events := make([]RunEventProjection, 0, len(values))
+	for _, value := range values {
+		event, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		events = append(events, runEventProjection(event, TaskBlock{}))
+	}
+	return events, true
+}
+
+func sessionEnvelopeProjection(payload map[string]any, block TaskBlock) SessionEnvelopeProjection {
+	relatedProjectIDs, _ := payloadStringSlice(payload, "relatedProjectIds")
+	return SessionEnvelopeProjection{
+		SessionID:         payloadString(payload, "sessionId"),
+		CWD:               payloadString(payload, "cwd"),
+		RecoveryCommand:   payloadString(payload, "recoveryCommand"),
+		RelatedProjectIDs: relatedProjectIDs,
+		Summary:           payloadString(payload, "summary"),
+		BlockID:           stringOrFallback(payloadString(payload, "blockId"), block.BlockID),
+		CreatedAt:         stringOrFallback(payloadString(payload, "createdAt"), block.CreatedAt),
+		NodeID:            stringOrFallback(payloadString(payload, "nodeId"), block.NodeID),
+		ActorID:           stringOrFallback(payloadString(payload, "actorId"), block.ActorID),
+	}
+}
+
+func runEventProjection(payload map[string]any, block TaskBlock) RunEventProjection {
+	affects, _ := payloadStringSlice(payload, "affects")
+	needsVerification, _ := payload["needsVerification"].(bool)
+	return RunEventProjection{
+		Severity:          payloadString(payload, "severity"),
+		Category:          payloadString(payload, "category"),
+		Summary:           payloadString(payload, "summary"),
+		Detail:            payloadString(payload, "detail"),
+		Affects:           affects,
+		NeedsVerification: needsVerification,
+		Next:              payloadString(payload, "next"),
+		BlockID:           stringOrFallback(payloadString(payload, "blockId"), block.BlockID),
+		CreatedAt:         stringOrFallback(payloadString(payload, "createdAt"), block.CreatedAt),
+		NodeID:            stringOrFallback(payloadString(payload, "nodeId"), block.NodeID),
+		ActorID:           stringOrFallback(payloadString(payload, "actorId"), block.ActorID),
+	}
+}
+
+func stringOrFallback(value string, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
+
+func trimRunEvents(events []RunEventProjection) []RunEventProjection {
+	if len(events) <= maxProjectedRunEvents {
+		return events
+	}
+	return append([]RunEventProjection{}, events[len(events)-maxProjectedRunEvents:]...)
 }
 
 func validateReconcile(block TaskBlock, ctx TransitionContext) TransitionResult {

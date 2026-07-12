@@ -103,6 +103,8 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
         canon_markdown text,
         inventory_markdown text,
         checkpoint_json text,
+        session_envelope_json text,
+        run_events_json text,
         heads_json text,
         updated_at text,
 	        PRIMARY KEY (project_id, task_id, lane_id)
@@ -133,6 +135,12 @@ func (s *SQLiteStore) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate sqlite store: %w", err)
 	}
 	if err := ensureColumn(ctx, s.db, "lane_projections", "heads_json", "text"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "lane_projections", "session_envelope_json", "text"); err != nil {
+		return err
+	}
+	if err := ensureColumn(ctx, s.db, "lane_projections", "run_events_json", "text"); err != nil {
 		return err
 	}
 	if err := ensureColumn(ctx, s.db, "task_blocks", "archived_at", "text"); err != nil {
@@ -327,6 +335,31 @@ func (s *SQLiteStore) HasBlock(ctx context.Context, blockID string) (bool, error
 
 func (s *SQLiteStore) LaneProjection(ctx context.Context, ref LaneRef) (LaneProjection, bool, error) {
 	return laneProjection(ctx, s.db, ref)
+}
+
+func (s *SQLiteStore) LatestSessionEnvelope(ctx context.Context) (LaneProjection, bool, error) {
+	var row struct {
+		projectID string
+		taskID    string
+		laneID    string
+	}
+	err := s.db.QueryRowContext(ctx, `
+      SELECT project_id, task_id, lane_id
+      FROM lane_projections
+      WHERE session_envelope_json IS NOT NULL
+      ORDER BY updated_at DESC
+      LIMIT 1`).Scan(&row.projectID, &row.taskID, &row.laneID)
+	if err == sql.ErrNoRows {
+		return LaneProjection{}, false, nil
+	}
+	if err != nil {
+		return LaneProjection{}, false, fmt.Errorf("query latest session envelope: %w", err)
+	}
+	lane, found, err := s.LaneProjection(ctx, LaneRef{ProjectID: row.projectID, TaskID: row.taskID, LaneID: row.laneID})
+	if err != nil {
+		return LaneProjection{}, false, err
+	}
+	return lane, found, nil
 }
 
 func (s *SQLiteStore) Blocks(ctx context.Context, ref LaneRef) ([]TaskBlock, error) {
@@ -770,7 +803,8 @@ func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjectio
 	err := db.QueryRowContext(ctx, `
       SELECT project_id, task_id, lane_id, tip, heads_json, lease_epoch, owner_node_id,
              owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
-             inventory_markdown, checkpoint_json, updated_at
+             inventory_markdown, checkpoint_json, session_envelope_json,
+             run_events_json, updated_at
       FROM lane_projections
       WHERE project_id = ? AND task_id = ? AND lane_id = ?`, ref.ProjectID, ref.TaskID, ref.LaneID).Scan(
 		&row.ProjectID,
@@ -786,6 +820,8 @@ func laneProjection(ctx context.Context, db queryer, ref LaneRef) (LaneProjectio
 		&row.CanonMarkdown,
 		&row.InventoryMarkdown,
 		&row.CheckpointJSON,
+		&row.SessionEnvelopeJSON,
+		&row.RunEventsJSON,
 		&row.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -886,6 +922,22 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
 		}
 		checkpointJSON = string(bytes)
 	}
+	var sessionEnvelopeJSON any
+	if lane.SessionEnvelope != nil {
+		bytes, err := json.Marshal(lane.SessionEnvelope)
+		if err != nil {
+			return err
+		}
+		sessionEnvelopeJSON = string(bytes)
+	}
+	var runEventsJSON any
+	if len(lane.RunEvents) > 0 {
+		bytes, err := json.Marshal(lane.RunEvents)
+		if err != nil {
+			return err
+		}
+		runEventsJSON = string(bytes)
+	}
 	var ownerNodeID, ownerActorID, ownerLeaseUntil any
 	var ownerLeaseEpoch any
 	if lane.Owner != nil {
@@ -900,8 +952,9 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
       INSERT INTO lane_projections (
         project_id, task_id, lane_id, tip, heads_json, lease_epoch, owner_node_id,
         owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
-        inventory_markdown, checkpoint_json, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        inventory_markdown, checkpoint_json, session_envelope_json, run_events_json,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(project_id, task_id, lane_id) DO UPDATE SET
         tip = excluded.tip,
         heads_json = excluded.heads_json,
@@ -913,6 +966,8 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
         canon_markdown = excluded.canon_markdown,
         inventory_markdown = excluded.inventory_markdown,
         checkpoint_json = excluded.checkpoint_json,
+        session_envelope_json = excluded.session_envelope_json,
+        run_events_json = excluded.run_events_json,
         updated_at = excluded.updated_at`,
 		lane.ProjectID,
 		lane.TaskID,
@@ -927,6 +982,8 @@ func upsertProjection(ctx context.Context, db execer, lane LaneProjection) error
 		nullIfEmpty(lane.CanonMarkdown),
 		nullIfEmpty(lane.InventoryMarkdown),
 		checkpointJSON,
+		sessionEnvelopeJSON,
+		runEventsJSON,
 		nullIfEmpty(lane.UpdatedAt),
 	)
 	if err != nil {
@@ -961,20 +1018,22 @@ func boolInt(value bool) int {
 }
 
 type projectionRow struct {
-	ProjectID         string
-	TaskID            string
-	LaneID            string
-	Tip               sql.NullString
-	HeadsJSON         sql.NullString
-	LeaseEpoch        int64
-	OwnerNodeID       sql.NullString
-	OwnerActorID      sql.NullString
-	OwnerLeaseEpoch   sql.NullInt64
-	OwnerLeaseUntil   sql.NullString
-	CanonMarkdown     sql.NullString
-	InventoryMarkdown sql.NullString
-	CheckpointJSON    sql.NullString
-	UpdatedAt         sql.NullString
+	ProjectID           string
+	TaskID              string
+	LaneID              string
+	Tip                 sql.NullString
+	HeadsJSON           sql.NullString
+	LeaseEpoch          int64
+	OwnerNodeID         sql.NullString
+	OwnerActorID        sql.NullString
+	OwnerLeaseEpoch     sql.NullInt64
+	OwnerLeaseUntil     sql.NullString
+	CanonMarkdown       sql.NullString
+	InventoryMarkdown   sql.NullString
+	CheckpointJSON      sql.NullString
+	SessionEnvelopeJSON sql.NullString
+	RunEventsJSON       sql.NullString
+	UpdatedAt           sql.NullString
 }
 
 func (r projectionRow) toProjection() LaneProjection {
@@ -1001,6 +1060,18 @@ func (r projectionRow) toProjection() LaneProjection {
 		var checkpoint CheckpointProjection
 		if err := json.Unmarshal([]byte(r.CheckpointJSON.String), &checkpoint); err == nil {
 			lane.Checkpoint = &checkpoint
+		}
+	}
+	if r.SessionEnvelopeJSON.Valid {
+		var envelope SessionEnvelopeProjection
+		if err := json.Unmarshal([]byte(r.SessionEnvelopeJSON.String), &envelope); err == nil {
+			lane.SessionEnvelope = &envelope
+		}
+	}
+	if r.RunEventsJSON.Valid {
+		var events []RunEventProjection
+		if err := json.Unmarshal([]byte(r.RunEventsJSON.String), &events); err == nil {
+			lane.RunEvents = events
 		}
 	}
 	return lane

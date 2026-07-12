@@ -1,5 +1,19 @@
-import type { ActorRef, CanonUpdatePayload, CheckpointPayload, HandoffPayload, InventoryUpdatePayload, LaneRef, LaneSnapshotPayload, ReconcilePayload, TaskBlock } from "./block.js";
+import type {
+  ActorRef,
+  CanonUpdatePayload,
+  CheckpointPayload,
+  HandoffPayload,
+  InventoryUpdatePayload,
+  LaneRef,
+  LaneSnapshotPayload,
+  ReconcilePayload,
+  RunEventPayload,
+  SessionEnvelopePayload,
+  TaskBlock,
+} from "./block.js";
 import { isSameLane, validateTaskBlock } from "./block.js";
+
+const MAX_PROJECTED_RUN_EVENTS = 20;
 
 export interface LaneOwner extends ActorRef {
   leaseEpoch: number;
@@ -20,6 +34,18 @@ export interface LaneProjection extends LaneRef {
     blocking?: string;
     next?: string;
   };
+  sessionEnvelope?: SessionEnvelopePayload & {
+    blockId?: string;
+    createdAt?: string;
+    nodeId?: string;
+    actorId?: string;
+  };
+  runEvents?: Array<RunEventPayload & {
+    blockId?: string;
+    createdAt?: string;
+    nodeId?: string;
+    actorId?: string;
+  }>;
   updatedAt?: string;
 }
 
@@ -81,6 +107,8 @@ export function validateBlockTransition(block: TaskBlock, context: TransitionCon
       return validateOwnedTipBlock(block, current, "heartbeat");
     case "checkpoint":
     case "canon_update":
+    case "session_envelope":
+    case "run_event":
       return validateOwnedTipBlock(block, current, block.kind);
     case "inventory_update":
       return validateTipExtendingBlock(block, current, "inventory_update");
@@ -187,9 +215,42 @@ export function applyBlockToProjection(current: LaneProjection | undefined, bloc
         };
       }
       if (payload.owner) next.owner = { ...payload.owner };
+      if (payload.sessionEnvelope) {
+        next.sessionEnvelope = {
+          ...payload.sessionEnvelope,
+          blockId: block.blockId,
+          createdAt: block.createdAt,
+          nodeId: block.nodeId,
+          actorId: block.actorId,
+        };
+      }
+      if (payload.runEvents) {
+        next.runEvents = payload.runEvents.map((entry) => ({ ...entry })).slice(-MAX_PROJECTED_RUN_EVENTS);
+      }
       next.heads = [block.blockId];
       break;
     }
+    case "session_envelope":
+      next.sessionEnvelope = {
+        ...(block.payload as SessionEnvelopePayload),
+        blockId: block.blockId,
+        createdAt: block.createdAt,
+        nodeId: block.nodeId,
+        actorId: block.actorId,
+      };
+      break;
+    case "run_event":
+      next.runEvents = [
+        ...(next.runEvents ?? []),
+        {
+          ...(block.payload as RunEventPayload),
+          blockId: block.blockId,
+          createdAt: block.createdAt,
+          nodeId: block.nodeId,
+          actorId: block.actorId,
+        },
+      ].slice(-MAX_PROJECTED_RUN_EVENTS);
+      break;
     case "task_intent":
     case "worker_profile":
     case "task_assignment":

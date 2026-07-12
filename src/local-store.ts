@@ -44,6 +44,8 @@ interface ProjectionRow {
   canon_markdown: string | null;
   inventory_markdown: string | null;
   checkpoint_json: string | null;
+  session_envelope_json: string | null;
+  run_events_json: string | null;
   updated_at: string | null;
 }
 
@@ -217,12 +219,16 @@ export class SQLiteTaskStore {
         canon_markdown text,
         inventory_markdown text,
         checkpoint_json text,
+        session_envelope_json text,
+        run_events_json text,
         heads_json text,
         updated_at text,
         PRIMARY KEY (project_id, task_id, lane_id)
       );
     `);
     this.ensureColumn("lane_projections", "heads_json", "text");
+    this.ensureColumn("lane_projections", "session_envelope_json", "text");
+    this.ensureColumn("lane_projections", "run_events_json", "text");
 
     this.db
       .prepare<[string]>(
@@ -267,8 +273,9 @@ export class SQLiteTaskStore {
         `INSERT INTO lane_projections (
            project_id, task_id, lane_id, tip, lease_epoch, owner_node_id,
            owner_actor_id, owner_lease_epoch, owner_lease_until, canon_markdown,
-           inventory_markdown, checkpoint_json, heads_json, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           inventory_markdown, checkpoint_json, session_envelope_json, run_events_json,
+           heads_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_id, task_id, lane_id) DO UPDATE SET
            tip = excluded.tip,
            heads_json = excluded.heads_json,
@@ -280,6 +287,8 @@ export class SQLiteTaskStore {
            canon_markdown = excluded.canon_markdown,
            inventory_markdown = excluded.inventory_markdown,
            checkpoint_json = excluded.checkpoint_json,
+           session_envelope_json = excluded.session_envelope_json,
+           run_events_json = excluded.run_events_json,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -295,6 +304,8 @@ export class SQLiteTaskStore {
         lane.canonMarkdown ?? null,
         lane.inventoryMarkdown ?? null,
         lane.checkpoint ? JSON.stringify(lane.checkpoint) : null,
+        lane.sessionEnvelope ? JSON.stringify(lane.sessionEnvelope) : null,
+        lane.runEvents?.length ? JSON.stringify(lane.runEvents) : null,
         lane.heads?.length ? JSON.stringify(lane.heads) : null,
         lane.updatedAt ?? null,
       );
@@ -375,6 +386,8 @@ function rowToProjection(row: ProjectionRow): LaneProjection {
     canonMarkdown: row.canon_markdown ?? undefined,
     inventoryMarkdown: row.inventory_markdown ?? undefined,
     checkpoint: row.checkpoint_json ? parseJson<LaneProjection["checkpoint"]>(row.checkpoint_json, `checkpoint projection for ${row.project_id}/${row.task_id}/${row.lane_id}`) : undefined,
+    sessionEnvelope: row.session_envelope_json ? parseJson<LaneProjection["sessionEnvelope"]>(row.session_envelope_json, `session envelope projection for ${row.project_id}/${row.task_id}/${row.lane_id}`) : undefined,
+    runEvents: row.run_events_json ? parseJson<NonNullable<LaneProjection["runEvents"]>>(row.run_events_json, `run event projection for ${row.project_id}/${row.task_id}/${row.lane_id}`) : undefined,
     updatedAt: row.updated_at ?? undefined,
   };
 }

@@ -140,18 +140,46 @@ type CheckpointProjection struct {
 	Next     string `json:"next,omitempty"`
 }
 
+type SessionEnvelopeProjection struct {
+	SessionID         string   `json:"sessionId"`
+	CWD               string   `json:"cwd"`
+	RecoveryCommand   string   `json:"recoveryCommand"`
+	RelatedProjectIDs []string `json:"relatedProjectIds,omitempty"`
+	Summary           string   `json:"summary,omitempty"`
+	BlockID           string   `json:"blockId,omitempty"`
+	CreatedAt         string   `json:"createdAt,omitempty"`
+	NodeID            string   `json:"nodeId,omitempty"`
+	ActorID           string   `json:"actorId,omitempty"`
+}
+
+type RunEventProjection struct {
+	Severity          string   `json:"severity"`
+	Category          string   `json:"category"`
+	Summary           string   `json:"summary"`
+	Detail            string   `json:"detail,omitempty"`
+	Affects           []string `json:"affects,omitempty"`
+	NeedsVerification bool     `json:"needsVerification,omitempty"`
+	Next              string   `json:"next,omitempty"`
+	BlockID           string   `json:"blockId,omitempty"`
+	CreatedAt         string   `json:"createdAt,omitempty"`
+	NodeID            string   `json:"nodeId,omitempty"`
+	ActorID           string   `json:"actorId,omitempty"`
+}
+
 type LaneProjection struct {
-	ProjectID         string                `json:"projectId"`
-	TaskID            string                `json:"taskId"`
-	LaneID            string                `json:"laneId"`
-	Tip               string                `json:"tip,omitempty"`
-	Heads             []string              `json:"heads,omitempty"`
-	LeaseEpoch        int64                 `json:"leaseEpoch"`
-	Owner             *LaneOwner            `json:"owner,omitempty"`
-	CanonMarkdown     string                `json:"canonMarkdown,omitempty"`
-	InventoryMarkdown string                `json:"inventoryMarkdown,omitempty"`
-	Checkpoint        *CheckpointProjection `json:"checkpoint,omitempty"`
-	UpdatedAt         string                `json:"updatedAt,omitempty"`
+	ProjectID         string                     `json:"projectId"`
+	TaskID            string                     `json:"taskId"`
+	LaneID            string                     `json:"laneId"`
+	Tip               string                     `json:"tip,omitempty"`
+	Heads             []string                   `json:"heads,omitempty"`
+	LeaseEpoch        int64                      `json:"leaseEpoch"`
+	Owner             *LaneOwner                 `json:"owner,omitempty"`
+	CanonMarkdown     string                     `json:"canonMarkdown,omitempty"`
+	InventoryMarkdown string                     `json:"inventoryMarkdown,omitempty"`
+	Checkpoint        *CheckpointProjection      `json:"checkpoint,omitempty"`
+	SessionEnvelope   *SessionEnvelopeProjection `json:"sessionEnvelope,omitempty"`
+	RunEvents         []RunEventProjection       `json:"runEvents,omitempty"`
+	UpdatedAt         string                     `json:"updatedAt,omitempty"`
 }
 
 type TransitionAction string

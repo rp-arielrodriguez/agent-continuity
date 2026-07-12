@@ -128,6 +128,114 @@ func TestSQLiteStoreBlocksReturnsEmptySliceForEmptyLane(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreProjectsSessionEnvelopeAndRunEvents(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenSQLiteStore(ctx, t.TempDir()+"/continuity.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	signer := newTestSigner(t, "macbook-ariel", "codex-session-1")
+	ref := LaneRef{ProjectID: "rp-arielrodriguez/agent-continuity", TaskID: "recovery-contract", LaneID: "main"}
+	bootstrap := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "bootstrap",
+		ParentTips: []string{},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: 0,
+		CreatedAt:  "2026-07-12T20:00:00.000Z",
+		Payload:    map[string]any{"summary": "Start recovery lane."},
+	})
+	if result, err := store.AppendBlock(ctx, bootstrap, ""); err != nil || !result.Accepted {
+		t.Fatalf("bootstrap append failed: result=%+v err=%v", result, err)
+	}
+	claim := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "claim_lane",
+		ParentTips: []string{bootstrap.BlockID},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: 1,
+		CreatedAt:  "2026-07-12T20:01:00.000Z",
+		Payload:    map[string]any{},
+	})
+	if result, err := store.AppendBlock(ctx, claim, ""); err != nil || !result.Accepted {
+		t.Fatalf("claim append failed: result=%+v err=%v", result, err)
+	}
+	envelope := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "session_envelope",
+		ParentTips: []string{claim.BlockID},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: 1,
+		CreatedAt:  "2026-07-12T20:02:00.000Z",
+		Payload: map[string]any{
+			"sessionId":         "codex-1",
+			"cwd":               "/workspace/agent-continuity",
+			"recoveryCommand":   "continuity resume --daemon --project-id rp-arielrodriguez/agent-continuity --task-id recovery-contract --lane-id main",
+			"relatedProjectIds": []any{"recarga/devex"},
+		},
+	})
+	if result, err := store.AppendBlock(ctx, envelope, ""); err != nil || !result.Accepted {
+		t.Fatalf("session envelope append failed: result=%+v err=%v", result, err)
+	}
+	runEvent := signer.signBlock(t, TaskBlock{
+		Version:    TaskBlockVersion,
+		ProjectID:  ref.ProjectID,
+		TaskID:     ref.TaskID,
+		LaneID:     ref.LaneID,
+		Kind:       "run_event",
+		ParentTips: []string{envelope.BlockID},
+		NodeID:     signer.nodeID,
+		ActorID:    signer.actorID,
+		LeaseEpoch: 1,
+		CreatedAt:  "2026-07-12T20:03:00.000Z",
+		Payload: map[string]any{
+			"severity":          "blocked",
+			"category":          "auth",
+			"summary":           "1Password signing unavailable.",
+			"affects":           []any{"git commit", "git push"},
+			"needsVerification": true,
+		},
+	})
+	if result, err := store.AppendBlock(ctx, runEvent, ""); err != nil || !result.Accepted {
+		t.Fatalf("run event append failed: result=%+v err=%v", result, err)
+	}
+
+	latest, found, err := store.LatestSessionEnvelope(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || latest.SessionEnvelope == nil || latest.SessionEnvelope.SessionID != "codex-1" {
+		t.Fatalf("unexpected latest session envelope: found=%v lane=%+v", found, latest)
+	}
+	if latest.RunEvents[0].Category != "auth" || !latest.RunEvents[0].NeedsVerification {
+		t.Fatalf("unexpected run event projection: %+v", latest.RunEvents)
+	}
+	if count, err := store.RebuildProjections(ctx); err != nil || count != 4 {
+		t.Fatalf("projection rebuild failed: count=%d err=%v", count, err)
+	}
+	rebuilt, found, err := store.LaneProjection(ctx, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || rebuilt.SessionEnvelope == nil || rebuilt.SessionEnvelope.RecoveryCommand == "" {
+		t.Fatalf("unexpected rebuilt recovery projection: found=%v lane=%+v", found, rebuilt)
+	}
+}
+
 func TestSQLiteStoreMigratesArchiveColumnsBeforeActiveIndex(t *testing.T) {
 	ctx := context.Background()
 	dbPath := t.TempDir() + "/continuity.db"
@@ -179,6 +287,11 @@ func TestSQLiteStoreMigratesArchiveColumnsBeforeActiveIndex(t *testing.T) {
 	}
 	if !sqliteIndexExists(t, store.db, "task_blocks_lane_active_sequence_idx") {
 		t.Fatal("missing task_blocks_lane_active_sequence_idx")
+	}
+	for _, column := range []string{"session_envelope_json", "run_events_json"} {
+		if !sqliteColumnExists(t, store.db, "lane_projections", column) {
+			t.Fatalf("missing migrated lane_projections.%s column", column)
+		}
 	}
 }
 

@@ -125,10 +125,21 @@ reason: ${input.reason ?? "<none>"}
 owner: ${owner}
 tip: ${input.lane.tip ?? "<empty>"}
 heads: ${(input.lane.heads ?? []).join(",") || "<none>"}
+session: ${input.lane.sessionEnvelope ? `${input.lane.sessionEnvelope.sessionId} cwd=${input.lane.sessionEnvelope.cwd}` : "<none>"}
+recoveryCommand: ${input.lane.sessionEnvelope?.recoveryCommand ?? "<none>"}
+runEvents: ${renderRunEvents(input.lane.runEvents)}
 ${sync}
 
 ${canon}
 </continuity-orient>`;
+}
+
+function renderRunEvents(events: AgentOrientResult["lane"]["runEvents"]): string {
+  if (!events?.length) return "<none>";
+  return events
+    .slice(-5)
+    .map((event) => `${event.severity}/${event.category}: ${event.summary}`)
+    .join(" | ");
 }
 
 export async function claimAgentLane(input: AgentClaimInput): Promise<AgentClaimResult> {

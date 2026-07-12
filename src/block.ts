@@ -19,6 +19,8 @@ export type TaskBlockKind =
   | "pause"
   | "reconcile"
   | "lane_snapshot"
+  | "session_envelope"
+  | "run_event"
   | "task_intent"
   | "worker_profile"
   | "task_assignment"
@@ -38,6 +40,8 @@ const TASK_BLOCK_KINDS = new Set<string>([
   "pause",
   "reconcile",
   "lane_snapshot",
+  "session_envelope",
+  "run_event",
   "task_intent",
   "worker_profile",
   "task_assignment",
@@ -52,6 +56,8 @@ const TASK_ASSIGNMENT_MODES = new Set<string>(["manual", "automatic"]);
 const TASK_RESULT_STATUSES = new Set<string>(["completed", "failed", "blocked", "cancelled"]);
 const EVALUATION_MODES = new Set<string>(["manual", "agent", "deterministic"]);
 const EVALUATION_CONFIDENCES = new Set<string>(["low", "medium", "high"]);
+const RUN_EVENT_SEVERITIES = new Set<string>(["info", "warning", "blocked", "error"]);
+const RUN_EVENT_CATEGORIES = new Set<string>(["auth", "disk", "network", "daemon", "git", "tool", "environment", "other"]);
 
 export interface LaneRef {
   projectId: string;
@@ -94,6 +100,8 @@ export type TaskBlockPayload =
   | PausePayload
   | ReconcilePayload
   | LaneSnapshotPayload
+  | SessionEnvelopePayload
+  | RunEventPayload
   | TaskIntentPayload
   | WorkerProfilePayload
   | TaskAssignmentPayload
@@ -184,6 +192,29 @@ export interface LaneSnapshotPayload {
   inventoryMarkdown?: string;
   checkpoint?: LaneSnapshotCheckpoint;
   owner?: LaneSnapshotOwner;
+  sessionEnvelope?: SessionEnvelopePayload;
+  runEvents?: RunEventPayload[];
+}
+
+export interface SessionEnvelopePayload {
+  sessionId: string;
+  cwd: string;
+  recoveryCommand: string;
+  relatedProjectIds?: string[];
+  summary?: string;
+}
+
+export type RunEventSeverity = "info" | "warning" | "blocked" | "error";
+export type RunEventCategory = "auth" | "disk" | "network" | "daemon" | "git" | "tool" | "environment" | "other";
+
+export interface RunEventPayload {
+  severity: RunEventSeverity;
+  category: RunEventCategory;
+  summary: string;
+  detail?: string;
+  affects?: string[];
+  needsVerification?: boolean;
+  next?: string;
 }
 
 export interface TaskIntentRequirements {
@@ -593,6 +624,14 @@ function validatePayload(kind: TaskBlockKind, payload: TaskBlockPayload): BlockV
       optionalString(payload, "inventoryMarkdown", issues);
       optionalSnapshotCheckpoint(payload, issues);
       optionalSnapshotOwner(payload, issues);
+      optionalSessionEnvelope(payload, "sessionEnvelope", issues);
+      optionalRunEvents(payload, issues);
+      break;
+    case "session_envelope":
+      validateSessionEnvelopePayload(payload, issues);
+      break;
+    case "run_event":
+      validateRunEventPayload(payload, issues);
       break;
     case "task_intent":
       requireString(payload, "title", issues);
@@ -963,6 +1002,56 @@ function optionalSnapshotOwner(payload: TaskBlockPayload, issues: BlockValidatio
   if (owner.leaseUntil !== undefined && (typeof owner.leaseUntil !== "string" || !isIsoDate(owner.leaseUntil))) {
     issues.push(issue("invalid_kind_payload", "owner.leaseUntil must be an ISO timestamp when provided"));
   }
+}
+
+function optionalSessionEnvelope(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>)[field];
+  if (value === undefined) return;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    issues.push(issue("invalid_kind_payload", `${field} must be an object when provided`));
+    return;
+  }
+  validateSessionEnvelopePayload(value as TaskBlockPayload, issues, `${field}.`);
+}
+
+function optionalRunEvents(payload: TaskBlockPayload, issues: BlockValidationIssue[]): void {
+  const value = (payload as Record<string, unknown>).runEvents;
+  if (value === undefined) return;
+  if (!Array.isArray(value)) {
+    issues.push(issue("invalid_kind_payload", "runEvents must be an array when provided"));
+    return;
+  }
+  for (const [index, entry] of value.entries()) {
+    if (entry === null || Array.isArray(entry) || typeof entry !== "object") {
+      issues.push(issue("invalid_kind_payload", `runEvents[${index}] must be an object`));
+      continue;
+    }
+    validateRunEventPayload(entry as TaskBlockPayload, issues, `runEvents[${index}].`);
+  }
+}
+
+function validateSessionEnvelopePayload(payload: TaskBlockPayload, issues: BlockValidationIssue[], prefix = ""): void {
+  const value = payload as Record<string, unknown>;
+  requireNestedString(value, "sessionId", `${prefix}sessionId`, issues);
+  requireNestedString(value, "cwd", `${prefix}cwd`, issues);
+  requireNestedString(value, "recoveryCommand", `${prefix}recoveryCommand`, issues);
+  optionalNestedStringArray(value, "relatedProjectIds", `${prefix}relatedProjectIds`, issues);
+  optionalNestedString(value, "summary", `${prefix}summary`, issues);
+}
+
+function validateRunEventPayload(payload: TaskBlockPayload, issues: BlockValidationIssue[], prefix = ""): void {
+  const value = payload as Record<string, unknown>;
+  if (typeof value.severity !== "string" || !RUN_EVENT_SEVERITIES.has(value.severity)) {
+    issues.push(issue("invalid_kind_payload", `${prefix}severity must be one of ${[...RUN_EVENT_SEVERITIES].join(", ")}`));
+  }
+  if (typeof value.category !== "string" || !RUN_EVENT_CATEGORIES.has(value.category)) {
+    issues.push(issue("invalid_kind_payload", `${prefix}category must be one of ${[...RUN_EVENT_CATEGORIES].join(", ")}`));
+  }
+  requireNestedString(value, "summary", `${prefix}summary`, issues);
+  optionalNestedString(value, "detail", `${prefix}detail`, issues);
+  optionalNestedStringArray(value, "affects", `${prefix}affects`, issues);
+  optionalNestedBoolean(value, "needsVerification", `${prefix}needsVerification`, issues);
+  optionalNestedString(value, "next", `${prefix}next`, issues);
 }
 
 function requireTimestamp(payload: TaskBlockPayload, field: string, issues: BlockValidationIssue[]): void {

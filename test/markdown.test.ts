@@ -34,7 +34,7 @@ test("default canon marks database as source of truth", () => {
 test("default canon marks daemon as source of truth for daemon checkpoints", () => {
   const canon = renderDefaultCanon({ ...input, source: "daemon-cli" });
   assert.match(canon, /Daemon continuity/);
-  assert.match(canon, /continuity resume --daemon --task-id demo-task/);
+  assert.match(canon, /continuity resume --daemon --project-id <PROJECT-ID> --task-id demo-task/);
 });
 
 test("default canon marks agent daemon checkpoints and bounded artifacts", () => {

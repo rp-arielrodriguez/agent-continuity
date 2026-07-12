@@ -78,6 +78,96 @@ test("local daemon provider builds signed blocks and submits them through JSON-R
   });
 });
 
+test("local daemon provider submits session envelopes and run events as signed blocks", async () => {
+  const signer = createEd25519Signer({ nodeId: "macbook-ariel", actorId: "codex-session-1" });
+  const submittedKinds: string[] = [];
+  let tip = "blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  await withRpcServer(async (request) => {
+    if (request.method === "lane.status") {
+      return {
+        lane: {
+          ...ref,
+          tip,
+          heads: [tip],
+          leaseEpoch: 1,
+          owner: { nodeId: signer.nodeId, actorId: signer.actorId, leaseEpoch: 1 },
+        },
+        action: "continue",
+      };
+    }
+    if (request.method === "block.submit") {
+      const submitted = (request.params as { block: TaskBlock }).block;
+      submittedKinds.push(submitted.kind);
+      tip = submitted.blockId;
+      return {
+        accepted: true,
+        action: "continue",
+        lane: {
+          ...ref,
+          tip,
+          leaseEpoch: 1,
+          owner: { nodeId: signer.nodeId, actorId: signer.actorId, leaseEpoch: 1 },
+          sessionEnvelope: submitted.kind === "session_envelope" ? submitted.payload : undefined,
+          runEvents: submitted.kind === "run_event" ? [submitted.payload] : undefined,
+        },
+        block: submitted,
+      };
+    }
+    throw new Error(`unexpected method ${request.method}`);
+  }, async (socketPath) => {
+    const provider = new LocalDaemonProvider({ socketPath });
+    const envelope = await provider.sessionEnvelope({
+      ...ref,
+      signer,
+      expectedTip: tip,
+      createdAt: "2026-07-12T20:10:00.000Z",
+      payload: {
+        sessionId: "codex-1",
+        cwd: "/tmp/work",
+        recoveryCommand: "continuity resume --daemon --project-id rp-arielrodriguez/agent-continuity --task-id agent-continuity-decentralized-runtime --lane-id main",
+      },
+    });
+    const event = await provider.runEvent({
+      ...ref,
+      signer,
+      expectedTip: envelope.block?.blockId,
+      createdAt: "2026-07-12T20:11:00.000Z",
+      payload: {
+        severity: "warning",
+        category: "disk",
+        summary: "Disk pressure observed.",
+      },
+    });
+
+    assert.equal(envelope.block?.kind, "session_envelope");
+    assert.equal(event.block?.kind, "run_event");
+    assert.deepEqual(submittedKinds, ["session_envelope", "run_event"]);
+  });
+});
+
+test("local daemon provider reads latest session envelope over JSON-RPC", async () => {
+  await withRpcServer(async (request) => {
+    if (request.method !== "session.last") throw new Error(`unexpected method ${request.method}`);
+    return {
+      ...ref,
+      tip: "blk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      leaseEpoch: 1,
+      sessionEnvelope: {
+        sessionId: "codex-1",
+        cwd: "/tmp/work",
+        recoveryCommand: "continuity resume --daemon --project-id rp-arielrodriguez/agent-continuity --task-id agent-continuity-decentralized-runtime --lane-id main",
+      },
+    };
+  }, async (socketPath) => {
+    const provider = new LocalDaemonProvider({ socketPath });
+    const lane = await provider.latestSessionEnvelope();
+
+    assert.equal(lane?.sessionEnvelope?.sessionId, "codex-1");
+    assert.equal(lane?.projectId, ref.projectId);
+  });
+});
+
 test("local daemon provider calls static peer sync over JSON-RPC", async () => {
   let params: unknown;
   await withRpcServer(async (request) => {

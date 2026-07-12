@@ -26,10 +26,10 @@ export function renderJournal(entries: JournalEntry[]): string {
 export function renderDefaultCanon(input: CheckpointInput): string {
   const daemonSource = isDaemonSource(input.source);
   const sourceLine = daemonSource
-    ? `- Daemon continuity via \`continuity resume --daemon --task-id ${input.taskId}\`.`
+    ? `- Daemon continuity via \`continuity resume --daemon --project-id <PROJECT-ID> --task-id ${input.taskId}\`.`
     : `- PostgreSQL continuity tables via \`continuity resume --task-id ${input.taskId}\`.`;
   const staleFix = daemonSource
-    ? `Run \`continuity checkpoint --daemon --task-id ${input.taskId}\` with reconciled canon before acting.`
+    ? `Run \`continuity checkpoint --daemon --project-id <PROJECT-ID> --task-id ${input.taskId}\` with reconciled canon before acting.`
     : `Run \`continuity reconcile --task-id ${input.taskId}\` before acting.`;
   const artifactsSection = input.files
     ? `

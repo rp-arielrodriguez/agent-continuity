@@ -101,8 +101,52 @@ try {
     assertIncludes(result.stdout, "container-harness-ok", "container agent-run should expose stdout");
     assertEqual(result.checkpoint.appended, true, "container agent-run should checkpoint");
 
+    const session = await jsonContinuity("worker-a", [
+      "session-start",
+      "--project-id",
+      projectId,
+      "--task-id",
+      taskId,
+      "--lane-id",
+      "main",
+      "--node-id",
+      "worker-a",
+      "--actor-id",
+      "worker-a-codex",
+      "--session-id",
+      "cluster-harness-session",
+      "--cwd",
+      "/workspace/agent-continuity",
+      "--summary",
+      "Cluster recovery envelope.",
+      "--json",
+    ]);
+    assertEqual(session.envelope.sessionId, "cluster-harness-session", "container session envelope should project");
+
+    const runEvent = await jsonContinuity("worker-a", [
+      "run-event-add",
+      "--project-id",
+      projectId,
+      "--task-id",
+      taskId,
+      "--lane-id",
+      "main",
+      "--node-id",
+      "worker-a",
+      "--actor-id",
+      "worker-a-codex",
+      "--severity",
+      "warning",
+      "--category",
+      "environment",
+      "--summary",
+      "Cluster recovery smoke event.",
+      "--json",
+    ]);
+    assertEqual(runEvent.result.lane.runEvents.at(-1).category, "environment", "container run event should project");
+
     const sync = await peerSyncLane("orchestrator", taskId, "main");
-    assertAtLeast(sync.insertedBlocks, 3, "orchestrator should import harness bootstrap, claim, and checkpoint");
+    assertAtLeast(sync.insertedBlocks, 5, "orchestrator should import harness, session, and run-event blocks");
     assertEqual(sync.rejectedBlocks, 0, "orchestrator should not reject container harness blocks");
 
     const orient = await jsonContinuity("orchestrator", [
@@ -120,6 +164,8 @@ try {
       "--json",
     ]);
     assertIncludes(orient.prompt, "container-harness-ok", "orchestrator orientation should include synced command proof");
+    assertIncludes(orient.prompt, "cluster-harness-session", "orchestrator orientation should include synced session envelope");
+    assertIncludes(orient.prompt, "warning/environment: Cluster recovery smoke event.", "orchestrator orientation should include synced run event");
   });
 
   await scenario("exclusive task is completed once and later workers drop to idle after sync", async () => {

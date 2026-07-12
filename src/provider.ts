@@ -12,6 +12,8 @@ import type {
   LaneSnapshotPayload,
   ReconcilePayload,
   ReleasePayload,
+  RunEventPayload,
+  SessionEnvelopePayload,
   TaskBlock,
   TaskBlockPayload,
   TaskBlockKind,
@@ -127,6 +129,20 @@ export interface LaneSnapshotInput extends LaneRef {
   createdAt?: string;
 }
 
+export interface SessionEnvelopeInput extends LaneRef {
+  signer: ContinuitySigner;
+  payload: SessionEnvelopePayload;
+  expectedTip?: string;
+  createdAt?: string;
+}
+
+export interface RunEventInput extends LaneRef {
+  signer: ContinuitySigner;
+  payload: RunEventPayload;
+  expectedTip?: string;
+  createdAt?: string;
+}
+
 export interface ContinuityProvider {
   health(): Promise<ProviderHealth>;
   status(input: LaneStatusInput): Promise<LaneStatus>;
@@ -142,6 +158,8 @@ export interface ContinuityProvider {
   release(input: ReleaseLaneInput): Promise<ProviderSubmitResult>;
   reconcile(input: ReconcileInput): Promise<ProviderSubmitResult>;
   snapshot(input: LaneSnapshotInput): Promise<ProviderSubmitResult>;
+  sessionEnvelope(input: SessionEnvelopeInput): Promise<ProviderSubmitResult>;
+  runEvent(input: RunEventInput): Promise<ProviderSubmitResult>;
 }
 
 export abstract class BaseContinuityProvider implements ContinuityProvider {
@@ -286,6 +304,26 @@ export abstract class BaseContinuityProvider implements ContinuityProvider {
       input.signer,
     );
     return this.submitBlock(block);
+  }
+
+  async sessionEnvelope(input: SessionEnvelopeInput): Promise<ProviderSubmitResult> {
+    const { lane } = await this.status(input);
+    return this.buildAndSubmit({
+      ...input,
+      kind: "session_envelope",
+      leaseEpoch: lane.leaseEpoch,
+      payload: input.payload,
+    });
+  }
+
+  async runEvent(input: RunEventInput): Promise<ProviderSubmitResult> {
+    const { lane } = await this.status(input);
+    return this.buildAndSubmit({
+      ...input,
+      kind: "run_event",
+      leaseEpoch: lane.leaseEpoch,
+      payload: input.payload,
+    });
   }
 
   private async buildAndSubmit<TPayload extends TaskBlockPayload>(
