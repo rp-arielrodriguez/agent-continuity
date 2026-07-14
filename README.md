@@ -36,6 +36,8 @@ agent -> continuity CLI -> Absurd task -> PostgreSQL continuity tables
                                 +-> markdown projection
 ```
 
+The personal-use product boundary and architecture decisions are documented in
+[`docs/personal-product-architecture.md`](docs/personal-product-architecture.md).
 The product-grade decentralized runtime direction is documented in
 [`docs/decentralized-runtime.md`](docs/decentralized-runtime.md). The daemon
 runtime now provides the provider-first path: signed task blocks, project/task

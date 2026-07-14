@@ -4,6 +4,9 @@ Continuity is an agent-native intent/state substrate. LLMs interpret natural
 language, but Continuity owns durable state, recovery, ownership, sync, and
 execution contracts.
 
+For the personal-use product boundary, authority hierarchy, and memory policy,
+see [`personal-product-architecture.md`](personal-product-architecture.md).
+
 ## Layer Contract
 
 ```text
