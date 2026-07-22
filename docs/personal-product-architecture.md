@@ -33,6 +33,9 @@ This is a private local-first product, not a public decentralized network.
   distributed task authority.
 - MCP is optional future ergonomics. CLI plus hooks/skills remain the correctness
   path because every coding agent can execute shell commands.
+- Agent integrations must query a versioned executable CLI contract. Static hook,
+  skill, or `AGENTS.md` copies of command syntax are not an authority and must not
+  drift independently.
 
 ## Layer Model
 
@@ -132,6 +135,23 @@ continuity run-event-add \
   --needs-verification
 ```
 
+## Contract Distribution
+
+Natural use depends on one contract flowing to every agent surface:
+
+```text
+typed contract in product code
+  -> continuity agent-contract [--json]
+    -> command-specific --help
+      -> Codex / Claude hooks
+      -> OpenCode plugin
+      -> installed checkpoints skill
+```
+
+Hooks detect intent; they do not own command syntax. The installer owns all
+Codex, Claude, and OpenCode adapter files. A clean agent must be able to discover
+the correct checkpoint/resume invocation without searching the source checkout.
+
 ## Canon Discipline
 
 The canon should stay short and current. It should not become an architecture
@@ -222,6 +242,10 @@ truth. tmux does not own distributed state.
 - Update and uninstall are idempotent.
 - Daemon starts, restarts, and reports useful doctor output.
 - Codex, Claude, and OpenCode integrations all orient through Continuity.
+- Agent integrations are installer-owned, use the same contract version, and do
+  not contain stale storage-authority instructions.
+- `continuity <command> --help` and `continuity agent-contract --json` expose
+  enough information for an agent to act without source inspection.
 - `session_envelope` and `run_event` recovery are visible in orient/resume.
 - tmux worker start/status/attach/stop is the primary UI.
 - Explicit intent submission launches capable workers.

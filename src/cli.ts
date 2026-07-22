@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
 import { claimAgentLane, handoffAgentLane, orientAgent, runAgentCommand } from "./agent-harness.js";
+import {
+  AGENT_CONTRACT_VERSION,
+  agentIntentContract,
+  agentIntentKinds,
+  allAgentIntentContracts,
+  commandIntentContract,
+  parseAgentIntentKind,
+  renderAgentIntentContract,
+} from "./agent-contract.js";
 import { defaultCheckpointInput, loadConfig, maskDatabaseUrl } from "./config.js";
 import { loadDashboardSnapshot, renderDashboard } from "./dashboard.js";
 import { daemonStatus, startDaemon, stopDaemon } from "./daemon-lifecycle.js";
@@ -75,9 +84,30 @@ interface ParsedArgs {
 
 async function main(argv: string[]): Promise<void> {
   const parsed = parseArgs(argv);
+  if (parsed.options.help === true) {
+    printCommandHelp(parsed.command, parsed.options.json === true);
+    return;
+  }
   const config = commandConfig(parsed);
 
   switch (parsed.command) {
+    case "agent-contract": {
+      const intentValue = stringOption(parsed, "intent");
+      if (intentValue) {
+        const contract = agentIntentContract(parseAgentIntentKind(intentValue));
+        if (parsed.options.json) console.log(JSON.stringify(contract, null, 2));
+        else console.log(renderAgentIntentContract(contract));
+      } else {
+        const contracts = allAgentIntentContracts();
+        if (parsed.options.json) console.log(JSON.stringify({ version: AGENT_CONTRACT_VERSION, contracts }, null, 2));
+        else {
+          console.log(`Agent Continuity contract ${AGENT_CONTRACT_VERSION}`);
+          console.log(`intents: ${agentIntentKinds().join(", ")}`);
+          console.log("Run `continuity agent-contract --intent <INTENT>` for the executable contract.");
+        }
+      }
+      return;
+    }
     case "setup": {
       if (parsed.options.local !== true) throw new Error("only local setup is supported: use continuity setup --local");
       const result = await setupLocal({
@@ -1456,12 +1486,12 @@ Summary: ${taskId} imported ${result.imported} new journal entries
           for (const path of result.removed) console.log(`removed: ${path}`);
           for (const path of result.skipped) console.log(`skipped: ${path}`);
           for (const message of result.messages) console.log(message);
-          console.log("Restart OpenCode/Claude for integration changes to load.");
+          console.log("Restart Codex/OpenCode/Claude for integration changes to load.");
         }
         return;
       }
       if (parsed.options["dry-run"] === true) {
-        throw new Error("--dry-run is only supported with install --target all|opencode|claude");
+        throw new Error("--dry-run is only supported with install --target all|codex|opencode|claude");
       }
 
       const result = await installProduct({
@@ -1530,10 +1560,18 @@ Summary: ${taskId} imported ${result.imported} new journal entries
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const [command = "", ...rest] = argv;
+  let [command = "", ...rest] = argv;
+  if (command === "help" && rest[0] && !rest[0].startsWith("-")) {
+    command = rest[0];
+    rest = ["--help", ...rest.slice(1)];
+  }
   const options: Record<string, string | boolean> = {};
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
+    if (arg === "-h") {
+      options.help = true;
+      continue;
+    }
     if (!arg.startsWith("--")) throw new Error(`unexpected argument: ${arg}`);
     const key = arg.slice(2);
     const next = rest[i + 1];
@@ -1597,8 +1635,8 @@ function discoveryProviders(parsed: ParsedArgs): OverlayDiscoveryProvider[] {
 function installTargetOption(parsed: ParsedArgs): InstallTarget | undefined {
   const target = stringOption(parsed, "target");
   if (target === undefined) return undefined;
-  if (target === "all" || target === "opencode" || target === "claude") return target;
-  throw new Error(`unsupported --target ${target}; expected all, opencode, or claude`);
+  if (target === "all" || target === "codex" || target === "opencode" || target === "claude") return target;
+  throw new Error(`unsupported --target ${target}; expected all, codex, opencode, or claude`);
 }
 
 async function projectIdOption(parsed: ParsedArgs): Promise<string> {
@@ -2177,10 +2215,11 @@ function printHelp(): void {
   console.log(`continuity <command>
 
 Commands:
+  agent-contract Print versioned, machine-readable agent intent contracts
   install     Install local runtime, integrations, daemon, and optional task migration
   uninstall   Remove local install artifacts; keeps data unless --delete-data
   setup       Low-level local Postgres, Absurd, schema, integrations, and daemon setup
-  checkpoint  Append a journal entry and rewrite canon through Absurd
+  checkpoint  Persist progress and canon through daemon authority or compatibility state
   doctor      Verify CLI, runtime, database schemas, queue, and integrations
   dashboard   Render a tmux-friendly continuityd lane dashboard
   orient      Sync optionally and print an agent-native daemon orientation packet
@@ -2233,13 +2272,15 @@ Commands:
   stop        Stop the configured local runtime
   backup      Dump the configured local Postgres database
   import      Import existing markdown projection into PostgreSQL through Absurd
-  install --target all|opencode|claude
+  install --target all|codex|opencode|claude
               Install only agent integrations
   reconcile   Rewrite canon from --canon-file through Absurd
-  resume      Print the canon for a task from PostgreSQL
+  resume      Print the canon for a task from daemon authority or compatibility state
   status      Show database-backed continuity state
 
 Examples:
+  continuity agent-contract --intent checkpoint
+  continuity agent-contract --intent recover --json
   continuity install
   continuity install --project-id PROJECT --task-id TASK --lane-id main
   continuity install --start-worker --worker-project-id PROJECT --worker-task-id TASK --worker-preset codex
@@ -2301,6 +2342,40 @@ Examples:
   continuity daemon-install --dry-run --launchd
   continuity daemon-start
   continuity daemon-migrate --project-id PROJECT --task-id TASK`);
+}
+
+function printCommandHelp(command: string, json: boolean): void {
+  if (command === "agent-contract") {
+    const help = {
+      command,
+      summary: "Print the versioned agent-native contract for one intent or all supported intents.",
+      usage: "continuity agent-contract [--intent <INTENT>] [--json]",
+      intents: agentIntentKinds(),
+    };
+    if (json) console.log(JSON.stringify(help, null, 2));
+    else {
+      console.log(`continuity ${command}`);
+      console.log("");
+      console.log(help.summary);
+      console.log("");
+      console.log(`Usage: ${help.usage}`);
+      console.log(`Intents: ${help.intents.join(", ")}`);
+    }
+    return;
+  }
+
+  const contract = commandIntentContract(command);
+  if (contract) {
+    if (json) console.log(JSON.stringify({ command, contract }, null, 2));
+    else {
+      console.log(`continuity ${command}`);
+      console.log("");
+      console.log(renderAgentIntentContract(contract));
+    }
+    return;
+  }
+
+  printHelp();
 }
 
 function commandConfig(parsed: ParsedArgs): ContinuityConfig {

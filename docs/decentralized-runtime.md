@@ -913,7 +913,7 @@ Phase 12: polished install/uninstall product flow done
   runs local setup, installs agent integrations, builds continuityd, starts the
   daemon, reports daemon status, optionally migrates a task with --project-id
   and --task-id, and prints doctor checks.
-  continuity install --target all|opencode|claude remains the integration-only
+  continuity install --target all|codex|opencode|claude remains the integration-only
   compatibility path.
   continuity uninstall now removes product install artifacts without requiring a
   live database: it stops the daemon, removes launchd plist when configured,

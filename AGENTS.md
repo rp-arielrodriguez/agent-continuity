@@ -1,15 +1,20 @@
 # Agent Instructions
 
-This repository provides the `continuity` CLI: durable checkpoint and resume
-state for coding agents, backed by Absurd and PostgreSQL.
+This repository provides the `continuity` CLI and daemon: durable state,
+coordination, recovery, scheduling, and peer sync for coding agents.
 
 ## Mental Model
 
-- PostgreSQL is the authority for journal entries and canon state.
-- Markdown files under `~/.config/opencode/checkpoints` are exported projections.
-- Agents own the semantic summary; the CLI owns durability, idempotency, and
-  projection export.
+- Accepted `continuityd` blocks and daemon projections are task authority.
+- PostgreSQL/Absurd is a compatibility and migration path for the original
+  checkpoint store.
+- Markdown files under `~/.config/opencode/checkpoints` are compatibility
+  projections.
+- Agents own semantic intent and summary content; the CLI/daemon own identity,
+  validation, durability, idempotency, sync, and projections.
 - Never edit checkpoint markdown as the authority. Use `continuity` commands.
+- Do not duplicate agent command syntax in hooks or skills. Query the executable
+  contract with `continuity agent-contract --intent <INTENT>`.
 
 ## Install For A User
 
@@ -22,8 +27,8 @@ continuity doctor
 ```
 
 `setup --local` is idempotent. It creates or reuses a Docker-managed PostgreSQL
-container, initializes Absurd and the `continuity.*` tables, writes local config,
-and installs OpenCode and Claude integrations.
+container, initializes the compatibility schema, writes local config, and
+installs Codex, OpenCode, and Claude integrations.
 
 OpenCode must use the npm plugin entry (`"agent-continuity"` in `opencode.json`),
 not a copied `file://` plugin. OpenCode installs npm plugins into its own cache
@@ -76,19 +81,28 @@ The password is generated and stored only in the local config file.
 
 ## Agent Operating Protocol
 
-On resume/orientation:
+Inspect the current agent-facing contract before relying on remembered syntax:
 
 ```bash
-continuity resume --task-id <TASK-ID>
+continuity agent-contract --intent resume
+continuity <command> --help
 ```
 
-Run this before reading markdown projections. If the user says `resume from
-<file>.md`, derive `<TASK-ID>` from the basename.
+On resume/orientation, prefer daemon authority and explicit project identity:
+
+```bash
+continuity resume --daemon --sync --project-id <PROJECT-ID> --task-id <TASK-ID> --lane-id main
+```
+
+Run this before reading markdown projections. If project identity is missing,
+use `continuity session-resume --last`, infer it from the active git checkout, or
+ask. Never silently select compatibility state for a same-named task.
 
 On checkpoint:
 
 ```bash
-continuity checkpoint \
+continuity checkpoint --daemon \
+  --project-id <PROJECT-ID> \
   --task-id <TASK-ID> \
   --status in_progress \
   --progress "<current truth>" \
@@ -96,13 +110,14 @@ continuity checkpoint \
 ```
 
 If a reconciled canon already exists and you have updated its content, pass it
-back through the database authority:
+through daemon authority with `--canon-file`:
 
 ```bash
-continuity checkpoint --task-id <TASK-ID> ... --canon-file <TASK-ID>.canon.md
+continuity checkpoint --daemon --project-id <PROJECT-ID> --task-id <TASK-ID> ... --canon-file <TASK-ID>.canon.md
 ```
 
-Or reconcile canon only:
+`continuity reconcile` and checkpoint commands without `--daemon` exist only for
+the announced PostgreSQL/Absurd compatibility path:
 
 ```bash
 continuity reconcile --task-id <TASK-ID> --canon-file <TASK-ID>.canon.md

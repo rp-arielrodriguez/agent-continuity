@@ -8,6 +8,49 @@ import { promisify } from "node:util";
 
 const execFile = promisify(execFileCallback);
 
+test("command help does not execute commands or require runtime options", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-home-"));
+  const env = { ...process.env, CONTINUITY_HOME: home, CONTINUITY_DATABASE_URL: "", ABSURD_DATABASE_URL: "" };
+  const cli = path.join(process.cwd(), "dist/src/cli.js");
+
+  try {
+    for (const args of [["checkpoint", "--help"], ["checkpoint", "-h"], ["help", "checkpoint"]]) {
+      const result = await execFile(process.execPath, [cli, ...args], { env });
+      assert.match(result.stdout, /^continuity checkpoint/m);
+      assert.match(result.stdout, /intent: checkpoint/);
+      assert.match(result.stdout, /checkpoint --daemon/);
+      assert.equal(result.stderr, "");
+    }
+
+    const json = await execFile(process.execPath, [cli, "checkpoint", "--help", "--json"], { env });
+    const parsed = JSON.parse(json.stdout) as { command: string; contract: { intent: string; requiredContext: string[] } };
+    assert.equal(parsed.command, "checkpoint");
+    assert.equal(parsed.contract.intent, "checkpoint");
+    assert.deepEqual(parsed.contract.requiredContext, ["projectId", "taskId", "status", "progress", "next"]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("agent contract exposes success and actionable validation errors", async () => {
+  const cli = path.join(process.cwd(), "dist/src/cli.js");
+  const success = await execFile(process.execPath, [cli, "agent-contract", "--intent", "checkpoint", "--json"]);
+  const parsed = JSON.parse(success.stdout) as { version: string; intent: string; preferredCommand: string };
+  assert.equal(parsed.version, "1.0.0");
+  assert.equal(parsed.intent, "checkpoint");
+  assert.match(parsed.preferredCommand, /--progress <SUMMARY>/);
+
+  await assert.rejects(
+    execFile(process.execPath, [cli, "agent-contract", "--intent", "unknown"]),
+    (error: unknown) => {
+      const result = error as { stderr?: string; code?: number };
+      assert.equal(result.code, 1);
+      assert.match(result.stderr ?? "", /unsupported --intent unknown; expected orient, resume, checkpoint/);
+      return true;
+    },
+  );
+});
+
 test("database commands fail clearly before setup", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-home-"));
   const env = { ...process.env, CONTINUITY_HOME: home, CONTINUITY_DATABASE_URL: "", ABSURD_DATABASE_URL: "" };
@@ -61,7 +104,7 @@ test("install rejects unsupported integration targets", async () => {
       (error: unknown) => {
         const result = error as { stderr?: string; code?: number };
         assert.equal(result.code, 1);
-        assert.match(result.stderr ?? "", /unsupported --target vim/);
+        assert.match(result.stderr ?? "", /unsupported --target vim; expected all, codex, opencode, or claude/);
         return true;
       },
     );

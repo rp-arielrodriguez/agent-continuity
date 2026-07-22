@@ -12,6 +12,8 @@ const image = `agent-continuity-cluster:${runId}`;
 const network = `continuity-cluster-${runId}`;
 const tmp = await mkdtemp(path.join("/tmp", "continuity-cluster-"));
 const rendezvousDir = path.join(tmp, "rendezvous");
+const clusterBinDir = path.join(root, "docker", ".cluster-bin");
+const clusterDaemon = path.join(clusterBinDir, "continuityd");
 const projectId = "rp-arielrodriguez/agent-continuity-cluster-lab";
 const trustedNames = "orchestrator,worker-a,worker-b";
 const nodes = [
@@ -23,6 +25,23 @@ const containers = [];
 
 try {
   await mkdir(rendezvousDir, { recursive: true });
+
+  await scenario("build one Linux daemon for the cluster architecture", async () => {
+    const architecture = (await docker(["info", "--format", "{{.Architecture}}"])).stdout.trim();
+    const goarch = architecture === "aarch64" || architecture === "arm64"
+      ? "arm64"
+      : architecture === "x86_64" || architecture === "amd64"
+        ? "amd64"
+        : undefined;
+    if (!goarch) throw new Error(`unsupported Docker architecture for cluster daemon: ${architecture}`);
+    await mkdir(clusterBinDir, { recursive: true });
+    await execFile("go", ["build", "-o", clusterDaemon, "./cmd/continuityd"], {
+      cwd: path.join(root, "daemon"),
+      env: { ...process.env, CGO_ENABLED: "0", GOOS: "linux", GOARCH: goarch, GOTOOLCHAIN: "go1.24.0+auto" },
+      encoding: "utf8",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+  });
 
   await scenario("build clean cluster node image", async () => {
     await docker(["build", "-f", "docker/cluster-node.Dockerfile", "-t", image, "."]);
@@ -52,9 +71,30 @@ try {
     for (const node of nodes) {
       await execIn(node.name, [
         shellJoin(["/workspace/agent-continuity/install.sh", "--from-source", "/workspace/agent-continuity", "--prefix", "/root/.local", "--no-product-install"]),
+        shellJoin(["install", "-m", "0755", "/usr/local/bin/continuityd", "/root/.local/bin/continuityd"]),
         shellJoin(["/root/.local/bin/continuity", ...nodeInitArgs(node.name)]),
       ].join("\n"));
     }
+  });
+
+  await scenario("clean node installs agent contracts and resolves natural checkpoint intent", async () => {
+    const home = "/tmp/continuity-agent-home";
+    const installed = await continuity("orchestrator", ["install", "--target", "all", "--home", home, "--json"]);
+    const result = JSON.parse(installed.stdout);
+    assertEqual(result.target, "all", "container integration install should target all agents");
+    assert(result.wrote.some((file) => file.endsWith(".codex/hooks.json")), "container install should configure Codex hooks");
+    assert(result.wrote.some((file) => file.endsWith(".claude/settings.json")), "container install should configure Claude hooks");
+
+    const help = await continuity("orchestrator", ["checkpoint", "--help"]);
+    assertIncludes(help.stdout, "intent: checkpoint", "container CLI help should expose checkpoint contract");
+    assertIncludes(help.stdout, "checkpoint --daemon", "container CLI help should expose daemon checkpoint syntax");
+
+    const hook = await execIn(
+      "orchestrator",
+      `HOME=${shellQuote(home)} CLAUDE_USER_PROMPT=${shellQuote("checkpoint this task")} bash ${shellQuote(`${home}/.codex/hooks/agent-continuity-user-prompt-submit.sh`)} </dev/null`,
+    );
+    assertIncludes(hook.stdout, "Agent Continuity contract 1.0.0", "container hook should query installed CLI contract");
+    assertIncludes(hook.stdout, "intent: checkpoint", "container hook should resolve natural checkpoint intent");
   });
 
   await scenario("discover all peers through file rendezvous without fixed host IPs", async () => {
@@ -317,6 +357,7 @@ try {
   await docker(["network", "rm", network], { allowFailure: true });
   await docker(["rmi", "-f", image], { allowFailure: true });
   await rm(tmp, { recursive: true, force: true });
+  await rm(clusterBinDir, { recursive: true, force: true });
 }
 
 function nodeInitArgs(name) {
@@ -342,6 +383,7 @@ function nodeInitArgs(name) {
     trustedNames,
     "--timeout-ms",
     "15000",
+    "--no-daemon-install",
   ];
 }
 

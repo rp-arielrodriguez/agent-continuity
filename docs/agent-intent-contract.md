@@ -26,6 +26,18 @@ Agents should use Continuity as the default safe place for stateful work:
 - record operational blockers as run events
 - preserve a session envelope before compaction, handoff, or long-running work
 
+The executable form of this document is versioned with the installed CLI:
+
+```bash
+continuity agent-contract
+continuity agent-contract --intent checkpoint
+continuity agent-contract --intent checkpoint --json
+continuity checkpoint --help
+```
+
+Hooks and skills select an intent and query this contract. They must not carry an
+independent copy of storage authority or detailed command syntax.
+
 ## IntentPacket
 
 An `IntentPacket` is the typed action an agent chooses after interpreting natural
@@ -49,10 +61,15 @@ Supported v1 intent kinds:
 |---|---|---|
 | `orient` | Understand current truth | Resolve project/task/lane, sync when requested, return canon, heads, owner, envelope, and run events |
 | `resume` | Continue known work | Require explicit/inferable project id or a valid session envelope |
+| `claim` | Take available interactive work | Respect fresh ownership and lease state before mutation |
+| `sync` | Refresh trusted distributed state | Fetch and validate only missing blocks from trusted peers |
 | `checkpoint` | Persist useful progress | Append checkpoint and reconcile canon when current truth changes |
+| `session` | Preserve exact recovery context | Persist project/task/lane/cwd and an executable recovery command |
+| `run-event` | Persist an operational event | Keep blockers and verification needs out of ephemeral chat-only state |
 | `handoff` | Transfer or release work | Validate ownership and write a durable handoff/release block |
 | `delegate` | Route work elsewhere | Use scheduler capabilities and trusted peers |
 | `speculate` | Run competing candidates | Keep forked results until evaluation/adjudication |
+| `result` | Publish worker output | Reference the originating intent/assignment and durable artifacts |
 | `evaluate` | Score outputs | Record rubric/use-case evidence before winner selection |
 | `adjudicate` | Select winner | Record decision and collapse scheduler heads |
 | `recover` | Rebuild lost context | Load session envelope, canon, journal heads, and run events |

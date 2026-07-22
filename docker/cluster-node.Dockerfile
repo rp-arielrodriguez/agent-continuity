@@ -9,6 +9,7 @@ RUN apt-get update \
 WORKDIR /workspace/agent-continuity
 COPY . .
 RUN npm ci && npm run build
+RUN install -m 0755 docker/.cluster-bin/continuityd /usr/local/bin/continuityd
 
 ENV PATH="/root/.local/bin:${PATH}"
 CMD ["sleep", "infinity"]

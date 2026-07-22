@@ -33,7 +33,7 @@
     "daemon",
     "dist/src",
     "docs",
-    "integrations/claude",
+    "integrations",
     "install.sh",
     "AGENTS.md",
     "README.md",

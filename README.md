@@ -1,27 +1,31 @@
 # Agent Continuity
 
-Durable checkpoint and resume state for coding agents, backed by
-[Absurd](https://github.com/earendil-works/absurd) and PostgreSQL.
+Local-first durable state, coordination, recovery, and scheduling for coding
+agents across processes and trusted machines.
 
-Agent Continuity makes checkpoint writes an explicit durable workflow instead of
-local dotfile glue. The agent still owns the semantic summary, but Absurd owns
-the execution boundary: append the journal, rewrite the canon, and export current
-markdown projections as one retry-safe workflow.
+The agent owns natural-language interpretation and semantic summaries.
+`continuityd` owns signed task blocks, identity, ownership, sync, projections,
+and scheduler state. PostgreSQL/Absurd remains the compatibility and migration
+path for the original checkpoint store; markdown files are exported projections.
 
-## Why Agents Were Not Using Absurd Before
+## Agent-Native Contract
 
-Claude and OpenCode integrations were only prompt/hook reminders. They told the
-agent to read or write markdown files under `~/.config/opencode/checkpoints`, but
-no agent-facing command existed that routed the write through Absurd. The missing
-piece was a CLI and integration contract that agents can call deterministically.
+Codex, Claude, and OpenCode integrations detect stateful user intents and direct
+the agent to a versioned executable contract. Command syntax and authority rules
+come from the installed CLI, not copied prompt text:
 
-This repo provides that contract:
+```bash
+continuity agent-contract
+continuity agent-contract --intent checkpoint
+continuity agent-contract --intent recover --json
+continuity checkpoint --help
+```
 
-- `continuity checkpoint` submits an Absurd task and waits for it to complete.
-- PostgreSQL is the authority for journal entries and canon state.
-- Markdown canon/journal files are exported projections for compatibility.
-- OpenCode and Claude integrations instruct agents to use the CLI instead of
-  editing checkpoint files directly.
+- Accepted daemon blocks and projections are task authority.
+- PostgreSQL/Absurd is an explicit fallback, never a silent same-task fallback.
+- Markdown canon/journal files and vendor memories are not distributed task
+  authority.
+- Repository-managed hooks and skills are installed for all three agent tools.
 
 ## For Agents
 
@@ -31,9 +35,12 @@ configuration, resume/checkpoint usage, verification, and safety rules.
 ## Architecture
 
 ```text
-agent -> continuity CLI -> Absurd task -> PostgreSQL continuity tables
-                                |
-                                +-> markdown projection
+natural-language intent -> agent interpretation -> versioned CLI contract
+  -> continuityd -> signed blocks -> canon/owner/queue/result projections
+       |                                |
+       +-> peer sync                    +-> tmux / agent orient
+
+PostgreSQL/Absurd -> compatibility migration bridge
 ```
 
 The personal-use product boundary and architecture decisions are documented in
@@ -70,14 +77,15 @@ human can inspect or intervene in local Codex, Claude, and OpenCode sessions.
 from the packaged Go source; `--launchd` writes a macOS launch agent plist
 without loading it implicitly.
 
-The durable task has three checkpointed steps:
+The PostgreSQL/Absurd compatibility workflow retains three durable steps:
 
 1. `append-journal`: insert an idempotent journal entry into Postgres.
 2. `rewrite-canon`: upsert the canon row for the task.
 3. `export-markdown`: atomically rewrite `<TASK-ID>.md` and `<TASK-ID>.canon.md`.
 
-If the process crashes between steps, Absurd retries from the last completed
-step. The database remains the source of truth; markdown is recoverable output.
+If the compatibility process crashes between steps, Absurd retries from the last
+completed step. Daemon-backed tasks use signed blocks as authority; markdown is
+recoverable output in both modes.
 
 ## Quick Start
 
@@ -112,7 +120,8 @@ continuity doctor
 `continuity install` is idempotent. It creates/reuses a Docker-managed
 PostgreSQL container and named volume, initializes Absurd and the
 `continuity.*` tables, writes `~/.config/agent-continuity/config.json`, installs
-the OpenCode and Claude integrations, builds `~/.local/bin/continuityd`, starts
+the Codex, OpenCode, and Claude integrations, builds
+`~/.local/bin/continuityd`, starts
 the daemon, and reports doctor checks. Re-running it should report
 existing/skipped resources rather than duplicating them.
 
@@ -129,6 +138,7 @@ Install only agent integrations, without touching the runtime:
 
 ```bash
 continuity install --target all
+continuity install --target codex
 continuity install --target opencode
 continuity install --target claude
 ```
@@ -469,7 +479,7 @@ npm run build
 ln -sf "$PWD/dist/src/cli.js" ~/.local/bin/continuity
 ```
 
-The installer supports `--target opencode`, `--target claude`, `--target all`,
+The installer supports `--target codex`, `--target opencode`, `--target claude`, `--target all`,
 `--dry-run`, and `--home <path>` for isolated testing. Restart the agent runtime
 after installing so config-time plugins/hooks are reloaded.
 
@@ -477,12 +487,12 @@ after installing so config-time plugins/hooks are reloaded.
 
 Integration templates live under `integrations/`.
 
-- Claude: `integrations/claude/hooks/` prompt-submit hook
+- Shared: prompt-submit hook and checkpoints skill under `integrations/shared/`
+- Codex: subagent and post-compaction hooks under `integrations/codex/`
 
-The OpenCode plugin is exported from the npm package via `./server`. The Claude
-hook is intentionally small. Its job is to inject the rule that agents call
-`continuity` for resume/checkpoint operations when the user prompt asks for that
-workflow. The CLI and database own the durability guarantees.
+The OpenCode plugin is exported from the npm package via `./server`. Hooks remain
+small: they detect intent and query `continuity agent-contract`; they do not copy
+storage authority or full command syntax. The CLI/daemon own the runtime contract.
 
 ## Scheduler Workers
 
