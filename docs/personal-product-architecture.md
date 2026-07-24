@@ -36,6 +36,10 @@ This is a private local-first product, not a public decentralized network.
 - Agent integrations must query a versioned executable CLI contract. Static hook,
   skill, or `AGENTS.md` copies of command syntax are not an authority and must not
   drift independently.
+- Canon is a derived read model over accepted blocks, not an unchecked
+  replacement authority. Publication must prevent unresolved workstreams from
+  disappearing and must validate task completion against the workstream
+  inventory. See [`design-evidence.md`](design-evidence.md).
 
 ## Layer Model
 
@@ -59,7 +63,8 @@ agent-native state substrate.
 | Information | Authority | Reason |
 |---|---|---|
 | Product architecture and product boundary | Repo docs under `docs/` | Versioned, reviewable, shared by all agents |
-| Long-running task truth | Daemon accepted blocks and canon projection | Syncable and replayable across machines |
+| Durable task history and decisions | Daemon accepted blocks | Signed, syncable, and replayable across machines |
+| Current task read model | Validated canon and inventory projections | Concise orientation derived from durable history |
 | Current recovery envelope | `session_envelope` block | Exact project/task/lane/cwd/recovery command |
 | Operational blockers | `run_event` blocks | Durable across compaction and handoff |
 | Personal preferences and stable heuristics | Tool memory files/databases | Useful hints, not task state |
@@ -166,6 +171,17 @@ and keep only the current truth:
 Architecture details belong in repo docs. Task execution truth belongs in
 Continuity blocks and projections.
 
+Canon publication is a state transition, not a blind text overwrite. A proposed
+canon must identify its predecessor and covered workstreams. An unresolved
+workstream may leave current truth only through an explicit evidenced transition.
+`completed` must be validated against the task inventory.
+
+The current implementation does not yet enforce this semantic non-regression
+gate. Accepted blocks preserve recovery evidence, but an agent-authored canon can
+still hide active scope. `E-CANON-001` in
+[`design-evidence.md`](design-evidence.md) records the observed failure and the
+required acceptance cases.
+
 ## Primary Use Cases
 
 ### Interactive Continuity
@@ -256,6 +272,8 @@ truth. tmux does not own distributed state.
 - Real-agent tests exercise Codex, Claude, OpenCode, and competition.
 - The canon points at this architecture doc instead of embedding architecture
   detail.
+- Canon publication rejects silent scope regression and completion with
+  unresolved workstreams.
 
 Anything outside this checklist is roadmap, not required for the personal-use
 finish line.

@@ -128,5 +128,9 @@ session transcript.
   state.
 - If current truth changes, the checkpoint contract must require canon
   reconciliation.
+- Reconciliation must not silently remove an unresolved workstream or a
+  previously accepted decision. Omission is not resolution.
+- `completed` must be validated against the known workstream inventory or an
+  explicit scoped-completion policy.
 - If compaction happens, the next agent must recover project id, task id, lane,
   cwd, blockers, and exact recovery command from Continuity.

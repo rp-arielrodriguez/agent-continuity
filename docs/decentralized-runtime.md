@@ -280,7 +280,8 @@ checkpoint:
   current lane tip, and referenced project/task/lane exist.
 
 canon_update:
-  valid under same ownership rule as checkpoint.
+  valid under same ownership rule as checkpoint, references its predecessor and
+  declared workstream coverage, and does not silently remove unresolved scope.
 
 inventory_update:
   valid if actor has inventory lane or task-level reconcile permission. It does
@@ -291,8 +292,8 @@ handoff:
   explicitly allowed.
 
 reconcile:
-  valid if it references known block tips and declares the projections it
-  updates.
+  valid if it references known block tips, declares the projections it updates,
+  and accounts for unresolved workstreams from the prior validated inventory.
 ```
 
 Clocks are not trusted for correctness. Correctness uses:
@@ -366,6 +367,8 @@ gossip and validate blocks.
 | Remote peer offline      | peer health stale   | local work allowed   | sync when peer returns  |
 | Network partition        | divergent tips      | mark conflict        | reconcile block         |
 | Lost canon focus         | inventory scan      | accept inventory     | restore workstream map  |
+| Canon scope regression   | coverage/inventory diff | reject or hold reconcile | restore omitted scope or explicitly supersede |
+| False task completion    | unresolved inventory | reject completion    | resolve or explicitly exclude open workstreams |
 | Corrupt block payload    | hash mismatch       | reject block         | refetch from peers      |
 | Unknown signer           | trust lookup miss   | reject/quarantine    | explicit trust import   |
 | Duplicate block          | block_id exists     | idempotent accept    | no-op                   |
