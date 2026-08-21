@@ -16,6 +16,22 @@ Observed on 2026-07-24 while recovering an existing task:
 - Recovery required inspecting older blocks and restoring Phase 2 as the active
   `in_progress` canon.
 
+Observed recurrence on 2026-08-21:
+
+- Post-merge follow-ups remained present in append-only daemon block history.
+- A reconciliation written at `2026-08-21T20:58Z` flattened the canon and
+  omitted the follow-up section.
+- A normal `resume` therefore presented an incomplete current state even though
+  recovery from history was still possible.
+- The immediate repair was to re-pin the follow-ups through another daemon
+  checkpoint.
+
+This recurrence happened after the failure mode was already known. It proves
+that agent instructions and manual re-pinning are mitigations, not correctness
+mechanisms. Follow-ups must be structured entities with stable identities and
+lifecycle status; their visibility cannot depend on an agent remembering to
+copy prose into every replacement canon.
+
 ### Finding
 
 Block durability prevented data loss, but durability alone did not preserve
@@ -43,6 +59,9 @@ checkpoint says so.
    `needs_reconciliation`; it does not replace the last accepted canon.
 6. Recovery can rebuild a candidate canon and workstream inventory from accepted
    blocks without relying on chat history or vendor memory.
+7. Unresolved follow-ups have stable identities and remain projected across
+   reconciliation until an explicit lifecycle transition closes or excludes
+   them.
 
 ### Design Consequences
 
@@ -52,6 +71,8 @@ checkpoint says so.
   semantic comparison when text meaning is involved.
 - Preserve explicit supersession evidence instead of treating text omission as
   resolution.
+- Model follow-ups as inventory items or linked workstreams, not as an
+  unstructured canon section that must be manually re-pinned.
 - Keep the canon concise; protection comes from inventory and validation
   metadata, not by copying the full journal into every canon.
 
@@ -64,6 +85,8 @@ checkpoint says so.
 | Canon explicitly supersedes a workstream with evidence | Publication is accepted and lineage remains inspectable |
 | Two agents propose divergent current truth | Both proposals remain durable; validated projection does not silently choose one |
 | Focused canon lacks older context | Recovery rebuilds inventory from accepted blocks and proposes a non-regressing canon |
+| Reconciliation flattens canon after merge | Every unresolved post-merge follow-up remains in the validated projection |
+| Agent re-pins a previously omitted follow-up | Repair is idempotent and restores the same item identity instead of creating a duplicate |
 
 Implementation and executable tests for these cases are required before the
 personal product can claim canon reconciliation safety.

@@ -176,6 +176,10 @@ canon must identify its predecessor and covered workstreams. An unresolved
 workstream may leave current truth only through an explicit evidenced transition.
 `completed` must be validated against the task inventory.
 
+Post-merge follow-ups are workstream inventory, not disposable canon prose.
+Their stable identity and lifecycle must survive canon flattening, compaction,
+handoff, and regeneration without requiring agents to manually re-pin them.
+
 The current implementation does not yet enforce this semantic non-regression
 gate. Accepted blocks preserve recovery evidence, but an agent-authored canon can
 still hide active scope. `E-CANON-001` in
