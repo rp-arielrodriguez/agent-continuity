@@ -32,6 +32,21 @@ mechanisms. Follow-ups must be structured entities with stable identities and
 lifecycle status; their visibility cannot depend on an agent remembering to
 copy prose into every replacement canon.
 
+Observed recurrence on 2026-09-08 during merge assessment:
+
+- The canon undercounted multiple confirmed issues.
+- Verification of Repo `#22652` was never completed, but the missing check was
+  not reliably represented as an active blocker in the current model.
+- The canon remained useful for initial orientation but was not reliable enough
+  to authorize a final merge or completion decision.
+- Recovery concluded that Continuity needs versioned feature synthesis instead
+  of another rewrite of historical prose.
+
+This occurrence expands the failure from state recovery into delivery safety. A
+lossy canon can cause an agent to implement against an incomplete scope, merge
+without evaluating every confirmed issue, or declare completion while required
+verification is still open.
+
 ### Finding
 
 Block durability prevented data loss, but durability alone did not preserve
@@ -62,6 +77,14 @@ checkpoint says so.
 7. Unresolved follow-ups have stable identities and remain projected across
    reconciliation until an explicit lifecycle transition closes or excludes
    them.
+8. Current feature synthesis is versioned and accounts for environments,
+   consumers, sources of truth, invariants, decisions, rejected paths, delivery
+   state, confirmed issues, required verification, and unresolved risks.
+9. Before implementation, the agent produces an impact matrix that references
+   the exact feature-model version and declares which items the proposed work
+   affects, preserves, supersedes, or leaves unresolved.
+10. Major reviews and merges trigger lineage validation and a new feature-model
+    synthesis. Canon text alone cannot authorize merge or completion.
 
 ### Design Consequences
 
@@ -73,6 +96,11 @@ checkpoint says so.
   resolution.
 - Model follow-ups as inventory items or linked workstreams, not as an
   unstructured canon section that must be manually re-pinned.
+- Separate orientation (`canon`) from delivery decisions (`merge_ready` and
+  `completed`), and require the latter to reference a validated feature-model
+  version plus verification evidence.
+- Keep append-only evidence immutable. Regenerate versioned current models from
+  that evidence rather than rewriting history into one lossy summary.
 - Keep the canon concise; protection comes from inventory and validation
   metadata, not by copying the full journal into every canon.
 
@@ -87,6 +115,10 @@ checkpoint says so.
 | Focused canon lacks older context | Recovery rebuilds inventory from accepted blocks and proposes a non-regressing canon |
 | Reconciliation flattens canon after merge | Every unresolved post-merge follow-up remains in the validated projection |
 | Agent re-pins a previously omitted follow-up | Repair is idempotent and restores the same item identity instead of creating a duplicate |
+| Feature synthesis undercounts confirmed issues | Validation reports the missing issue identities and rejects publication |
+| Required Repo `#22652` verification is incomplete | Merge-ready and completed transitions are rejected with the open verification named |
+| Agent begins implementation | An impact matrix references the current feature-model version and accounts for every affected item |
+| Major review or merge lands | A new feature-model version preserves lineage and revalidates active scope, delivery state, and risks |
 
 Implementation and executable tests for these cases are required before the
 personal product can claim canon reconciliation safety.

@@ -50,7 +50,8 @@ User language
       -> continuity CLI / SDK Provider API
         -> local continuityd
           -> signed task blocks
-            -> projections: canon, owner, queue, results, run events
+            -> projections: canon, feature model, impact matrix, owner, queue,
+               results, run events, delivery gates
               -> tmux dashboard / agent orient / peer sync
 ```
 
@@ -186,6 +187,38 @@ still hide active scope. `E-CANON-001` in
 [`design-evidence.md`](design-evidence.md) records the observed failure and the
 required acceptance cases.
 
+## Feature Synthesis And Delivery Gates
+
+The canon is an orientation projection. It is not sufficient evidence for a
+final merge or completion decision. The target read-model flow is:
+
+```text
+append-only accepted evidence
+  -> FeatureModel vN
+       environments
+       consumers
+       sources of truth
+       invariants and decisions
+       rejected paths
+       delivery state
+       confirmed issues and required verification
+       unresolved follow-ups and risks
+    -> ImpactMatrix(featureModelVersion = vN)
+       affected / preserved / superseded / unresolved
+      -> implementation and review evidence
+        -> FeatureModel vN+1 with lineage validation
+          -> explicit merge_ready or completed decision
+```
+
+Before implementation, the acting agent must produce an impact matrix against
+the current validated feature model. After a major review or merge, Continuity
+must synthesize a new model, compare lineage and coverage, and reject the
+delivery transition if active scope or required verification disappeared.
+
+Structural coverage and lifecycle checks belong in Continuity core. An
+evaluator agent may assess semantic equivalence or quality, but its result is
+evidence for a typed decision; it cannot silently replace current truth.
+
 ## Primary Use Cases
 
 ### Interactive Continuity
@@ -278,6 +311,13 @@ truth. tmux does not own distributed state.
   detail.
 - Canon publication rejects silent scope regression and completion with
   unresolved workstreams.
+- Versioned feature synthesis accounts for environments, consumers, sources of
+  truth, decisions, rejected paths, delivery state, confirmed issues,
+  verification, follow-ups, and risks.
+- Implementation starts from an impact matrix tied to the current feature-model
+  version.
+- Merge-ready and completed transitions require post-review synthesis, valid
+  lineage, full active-scope coverage, and completed required verification.
 
 Anything outside this checklist is roadmap, not required for the personal-use
 finish line.

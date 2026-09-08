@@ -132,5 +132,11 @@ session transcript.
   previously accepted decision. Omission is not resolution.
 - `completed` must be validated against the known workstream inventory or an
   explicit scoped-completion policy.
+- Canon output is sufficient for orientation, not for a final merge/completion
+  decision. That decision must reference a validated feature-model version and
+  all required verification evidence.
+- Before implementation, an impact matrix must reference the current
+  feature-model version. Major reviews and merges must regenerate and validate
+  the model before delivery state advances.
 - If compaction happens, the next agent must recover project id, task id, lane,
   cwd, blockers, and exact recovery command from Continuity.
