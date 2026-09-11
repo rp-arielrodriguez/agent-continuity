@@ -3,6 +3,12 @@
 This matrix defines product behavior that must keep working as Continuity grows
 from manual checkpoint sync into scheduler-backed agent execution.
 
+See the [combined feature matrix](product-feature-matrix.md) for required but
+missing behavior and consistency guarantees. In particular, AC-SCHED-003 proves
+duplicate avoidance after fresh state is visible; it does not prove exclusive
+execution across a network partition. Evidence paths below do not imply that
+every listed physical or container scenario has passed.
+
 ## Capability Vocabulary
 
 `tools` are harness capabilities, not model families. A task that declares

@@ -4,6 +4,12 @@ This document is the source of truth for the personal-use product slice. It
 freezes the current architecture decisions so future agents do not expand scope
 or re-litigate the product boundary from chat history.
 
+The [combined feature matrix](product-feature-matrix.md) maps the full scope to
+current code, Beads comparison, consistency requirements, and reuse options.
+Strict exclusive work requires ordered authorization and protection against
+stale owners; speculative work may proceed offline. The task-state backend and
+authority/quorum mechanism remain open decisions.
+
 ## Product Stop Line
 
 Continuity is finished for personal use when this loop is reliable:
