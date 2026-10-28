@@ -1,5 +1,5 @@
 import type { CheckpointPayload, ContinuitySigner, LaneRef, TaskBlock } from "./block.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderDefaultCanon, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, withLastReconciled } from "./markdown.js";
 import type { ContinuityProvider, LaneStatus, ProviderSubmitResult } from "./provider.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import type { CheckpointInput } from "./types.js";
@@ -67,7 +67,8 @@ export async function runDaemonCheckpoint(input: DaemonCheckpointInput): Promise
   }
 
   const ready = await ensureWritableLane(input.provider, lane, signerState.signer, input);
-  const canonMarkdown = normalizedCanon(input);
+  // Previous canon comes from the pre-bootstrap status so a first checkpoint keeps the template.
+  const canonMarkdown = normalizedCanon(input, status.lane.canonMarkdown);
   const checkpoint = await submitRequired(
     await input.provider.checkpoint({
       ...lane,
@@ -172,8 +173,8 @@ async function ensureWritableLane(
   return status;
 }
 
-function normalizedCanon(input: CheckpointInput): string {
-  const canonMarkdown = input.canonMarkdown ?? renderDefaultCanon({ ...input, source: input.source ?? "daemon-cli" });
+function normalizedCanon(input: CheckpointInput, previousCanon?: string | null): string {
+  const canonMarkdown = input.canonMarkdown ?? renderCarriedCanon({ ...input, source: input.source ?? "daemon-cli" }, previousCanon);
   assertCanonTaskId(canonMarkdown, input.taskId);
   return withLastReconciled(canonMarkdown, input.timestamp);
 }

@@ -1,7 +1,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CanonRecord, CheckpointInput, JournalEntry } from "./types.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderDefaultCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
 import type { Queryable } from "./schema.js";
 
 interface JournalRow {
@@ -70,7 +70,7 @@ export async function insertJournalEntries(db: Queryable, entries: JournalEntry[
 }
 
 export async function upsertCanon(db: Queryable, input: CheckpointInput): Promise<void> {
-  const canonMarkdown = input.canonMarkdown ?? renderDefaultCanon(input);
+  const canonMarkdown = input.canonMarkdown ?? renderCarriedCanon(input, (await getCanon(db, input.taskId))?.canonMarkdown);
   await upsertCanonMarkdown(db, input.taskId, input.timestamp, canonMarkdown);
 }
 

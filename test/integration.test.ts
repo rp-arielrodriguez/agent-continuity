@@ -35,3 +35,39 @@ test("writes checkpoint through Absurd and exports markdown", { skip: !process.e
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test("progress-only checkpoint carries the previous canon forward on the PostgreSQL path", { skip: !process.env.CONTINUITY_TEST_DATABASE_URL }, async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "agent-continuity-"));
+  const config: ContinuityConfig = {
+    databaseUrl: process.env.CONTINUITY_TEST_DATABASE_URL!,
+    queueName: process.env.CONTINUITY_TEST_QUEUE ?? "default",
+    checkpointDir: dir,
+    workerTimeoutSeconds: 30,
+  };
+  const taskId = `integration-carry-${Date.now()}`;
+  const base: CheckpointInput = {
+    taskId,
+    timestamp: new Date().toISOString(),
+    modelId: "node-test",
+    sessionId: "integration-session",
+    status: "in_progress",
+    progress: "First.",
+    next: "Second.",
+    checkpointDir: dir,
+    source: "test",
+  };
+
+  try {
+    await runCheckpoint({
+      ...base,
+      canonMarkdown: `# Canon: ${taskId}\n\nlast-reconciled: x\n\n## CURRENT-TRUTH / INVARIANTS\n- INVARIANT-X: keep me.\n\n## NEXT-ACTION\n- Old.\n`,
+    }, config);
+    await runCheckpoint({ ...base, timestamp: new Date(Date.parse(base.timestamp) + 1000).toISOString(), progress: "Progress only.", next: "New next." }, config);
+    const canon = await readCanon(taskId, config);
+    assert.match(canon ?? "", /INVARIANT-X: keep me\./);
+    assert.match(canon ?? "", /## LATEST-PROGRESS\n- Progress only\.\n/);
+    assert.match(canon ?? "", /## NEXT-ACTION\n- New next\.\n/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

@@ -109,3 +109,54 @@ test("daemon checkpoint reuses current local owner when actor is omitted", async
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+test("daemon progress-only checkpoint carries the previous canon forward", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  const customCanon = `# Canon: ${ref.taskId}
+
+last-reconciled: 2026-07-04T00:30:00.000Z
+
+## SOURCE-OF-TRUTH
+- Daemon continuity.
+
+## CURRENT-TRUTH / INVARIANTS
+- INVARIANT-X: the review gate is required.
+
+## DECISIONS
+- Current checkpoint status: in_progress.
+- DECISION-Y: use the loop design.
+
+## REJECTED (do not re-derive)
+- REJECTED-Z: skipping the gate.
+
+## NEXT-ACTION
+- Old next action.
+`;
+  try {
+    // (d) first checkpoint without canon uses the template
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:29:00.000Z", progress: "First.", next: "Second." });
+    const first = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(first, /## CURRENT-TRUTH \/ INVARIANTS\n- First\./);
+    assert.doesNotMatch(first, /LATEST-PROGRESS/);
+
+    // (c) explicit canon still replaces
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:30:00.000Z", progress: "Explicit.", canonMarkdown: customCanon });
+    const explicit = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(explicit, /INVARIANT-X/);
+    assert.doesNotMatch(explicit, /## CURRENT-TRUTH \/ INVARIANTS\n- First\./);
+
+    // (a)+(b) progress-only checkpoint carries forward
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:31:00.000Z", progress: "Progress only.", next: "New next." });
+    const carried = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(carried, /INVARIANT-X: the review gate is required\./);
+    assert.match(carried, /DECISION-Y: use the loop design\./);
+    assert.match(carried, /REJECTED-Z: skipping the gate\./);
+    assert.match(carried, /last-reconciled: 2026-07-04T00:31:00\.000Z/);
+    assert.match(carried, /## LATEST-PROGRESS\n- Progress only\.\n/);
+    assert.match(carried, /## NEXT-ACTION\n- New next\.\n/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});

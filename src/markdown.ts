@@ -63,6 +63,38 @@ ${artifactsSection}
 `;
 }
 
+/**
+ * Build the canon for a checkpoint that carries no explicit canon.
+ * With a previous canon, every section is preserved; only last-reconciled,
+ * the status line, LATEST-PROGRESS and (when given) NEXT-ACTION change.
+ */
+export function renderCarriedCanon(input: CheckpointInput, previousCanon: string | null | undefined): string {
+  if (!previousCanon || !previousCanon.trim()) return renderDefaultCanon(input);
+
+  let canon = withLastReconciled(previousCanon, input.timestamp);
+  canon = canon.replace(/^(- Current checkpoint status: ).*\.$/m, `$1${input.status}.`);
+  canon = setSectionBody(canon, "LATEST-PROGRESS", `- ${input.progress}`, "NEXT-ACTION");
+  if (input.next !== undefined) canon = setSectionBody(canon, "NEXT-ACTION", `- ${input.next}`);
+  return canon;
+}
+
+// Replace the body of `## <name>` (or the heading line starting with it); create it
+// before `beforeName` (or at the end) when missing.
+function setSectionBody(canon: string, name: string, body: string, beforeName?: string): string {
+  const lines = canon.split("\n");
+  const isHeading = (line: string, n: string) => line === `## ${n}` || line.startsWith(`## ${n} `);
+  const start = lines.findIndex((line) => isHeading(line, name));
+  if (start >= 0) {
+    let end = lines.findIndex((line, i) => i > start && line.startsWith("## "));
+    if (end < 0) end = lines.length;
+    return [...lines.slice(0, start + 1), body, "", ...lines.slice(end)].join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  const section = [`## ${name}`, body, ""];
+  const before = beforeName ? lines.findIndex((line) => isHeading(line, beforeName)) : -1;
+  if (before >= 0) return [...lines.slice(0, before), ...section, ...lines.slice(before)].join("\n");
+  return [...lines.join("\n").trimEnd().split("\n"), "", ...section].join("\n");
+}
+
 function isDaemonSource(source: string | undefined): boolean {
   return Boolean(source?.startsWith("daemon") || source?.startsWith("agent-") || source === "scheduler-worker");
 }

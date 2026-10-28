@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertCanonTaskId, idempotencyKeyFor, lastReconciledFromCanon, parseJournalEntries, renderDefaultCanon, renderJournalEntry, withLastReconciled } from "../src/markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, lastReconciledFromCanon, parseJournalEntries, renderCarriedCanon, renderDefaultCanon, renderJournalEntry, withLastReconciled } from "../src/markdown.js";
 import type { CheckpointInput } from "../src/types.js";
 
 const input: CheckpointInput = {
@@ -78,4 +78,54 @@ test("parses legacy journal headers with a title suffix", () => {
 
 test("extracts canon last-reconciled header", () => {
   assert.equal(lastReconciledFromCanon("# Canon: demo\n\nlast-reconciled: 2026-06-14T00:00:00Z\n"), "2026-06-14T00:00:00Z");
+});
+
+const previousCanon = `# Canon: demo-task
+
+last-reconciled: 2026-06-13T00:00:00.000Z
+
+## SOURCE-OF-TRUTH
+- Daemon continuity.
+
+## CURRENT-TRUTH / INVARIANTS
+- INVARIANT-X: the review gate is required.
+
+## DECISIONS
+- Current checkpoint status: in_progress.
+- DECISION-Y: use the loop design.
+
+## REJECTED (do not re-derive)
+- REJECTED-Z: skipping the gate.
+
+## NEXT-ACTION
+- Old next action.
+`;
+
+test("carried canon keeps invariants, decisions and rejections after a progress-only checkpoint", () => {
+  const canon = renderCarriedCanon(input, previousCanon);
+  assert.match(canon, /INVARIANT-X: the review gate is required\./);
+  assert.match(canon, /DECISION-Y: use the loop design\./);
+  assert.match(canon, /REJECTED-Z: skipping the gate\./);
+  assert.match(canon, /last-reconciled: 2026-06-14T00:00:00\.000Z/);
+  assert.match(canon, /- Current checkpoint status: completed\./);
+  assert.doesNotMatch(canon, /## CURRENT-TRUTH \/ INVARIANTS\n- Validated/);
+});
+
+test("carried canon updates NEXT-ACTION and LATEST-PROGRESS, replacing old bodies", () => {
+  const first = renderCarriedCanon(input, previousCanon);
+  assert.match(first, /## LATEST-PROGRESS\n- Validated durable checkpoint writes\.\n/);
+  assert.match(first, /## NEXT-ACTION\n- Install integrations\.\n/);
+  assert.doesNotMatch(first, /Old next action/);
+  assert.ok(first.indexOf("## LATEST-PROGRESS") < first.indexOf("## NEXT-ACTION"));
+
+  const second = renderCarriedCanon({ ...input, progress: "Second.", next: undefined }, first);
+  assert.equal(second.match(/## LATEST-PROGRESS/g)?.length, 1);
+  assert.match(second, /## LATEST-PROGRESS\n- Second\.\n/);
+  assert.match(second, /## NEXT-ACTION\n- Install integrations\.\n/);
+  assert.match(second, /INVARIANT-X/);
+});
+
+test("carried canon falls back to the default template without a previous canon", () => {
+  assert.equal(renderCarriedCanon(input, null), renderDefaultCanon(input));
+  assert.equal(renderCarriedCanon(input, undefined), renderDefaultCanon(input));
 });
