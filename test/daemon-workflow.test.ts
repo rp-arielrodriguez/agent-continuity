@@ -109,3 +109,78 @@ test("daemon checkpoint reuses current local owner when actor is omitted", async
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+test("daemon progress-only checkpoint carries the previous canon forward", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  const customCanon = `# Canon: ${ref.taskId}
+
+last-reconciled: 2026-07-04T00:30:00.000Z
+
+## SOURCE-OF-TRUTH
+- Daemon continuity.
+
+## CURRENT-TRUTH / INVARIANTS
+- INVARIANT-X: the review gate is required.
+
+## DECISIONS
+- Current checkpoint status: in_progress.
+- DECISION-Y: use the loop design.
+
+## REJECTED (do not re-derive)
+- REJECTED-Z: skipping the gate.
+
+## NEXT-ACTION
+- Old next action.
+`;
+  try {
+    // (d) first checkpoint without canon uses the template
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:29:00.000Z", progress: "First.", next: "Second." });
+    const first = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(first, /## CURRENT-TRUTH \/ INVARIANTS\n- First\./);
+    assert.doesNotMatch(first, /LATEST-PROGRESS/);
+
+    // (c) explicit canon still replaces
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:30:00.000Z", progress: "Explicit.", canonMarkdown: customCanon });
+    const explicit = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(explicit, /INVARIANT-X/);
+    assert.doesNotMatch(explicit, /## CURRENT-TRUTH \/ INVARIANTS\n- First\./);
+
+    // (a)+(b) progress-only checkpoint carries forward
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:31:00.000Z", progress: "Progress only.", next: "New next." });
+    const carried = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(carried, /INVARIANT-X: the review gate is required\./);
+    assert.match(carried, /DECISION-Y: use the loop design\./);
+    assert.match(carried, /REJECTED-Z: skipping the gate\./);
+    assert.match(carried, /last-reconciled: 2026-07-04T00:31:00\.000Z/);
+    assert.match(carried, /## LATEST-PROGRESS\n- Progress only\.\n/);
+    assert.match(carried, /## NEXT-ACTION\n- New next\.\n/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon carried canon comes from the snapshot that guards the write", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  try {
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:40:00.000Z", progress: "Old.", canonMarkdown: `# Canon: ${ref.taskId}\n\n## DECISIONS\n- OLD-DECISION.\n` });
+    const staleStatus = await provider.status(ref);
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:41:00.000Z", progress: "Newer.", canonMarkdown: `# Canon: ${ref.taskId}\n\n## DECISIONS\n- INTERVENING-DECISION.\n` });
+
+    // The first status read returns the snapshot from before the intervening canon update.
+    let statusReads = 0;
+    const racingProvider = Object.create(provider) as MemoryProvider;
+    racingProvider.status = async (input) => (statusReads++ === 0 ? staleStatus : provider.status(input));
+    await runDaemonCheckpoint({ ...base, provider: racingProvider, timestamp: "2026-07-04T00:42:00.000Z", progress: "Progress only." });
+
+    const carried = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(carried, /INTERVENING-DECISION/);
+    assert.doesNotMatch(carried, /OLD-DECISION/);
+    assert.match(carried, /## LATEST-PROGRESS\n- Progress only\.\n/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});

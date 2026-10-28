@@ -1,7 +1,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CanonRecord, CheckpointInput, JournalEntry } from "./types.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderDefaultCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
 import type { Queryable } from "./schema.js";
 
 interface JournalRow {
@@ -69,14 +69,47 @@ export async function insertJournalEntries(db: Queryable, entries: JournalEntry[
   return inserted;
 }
 
+const CANON_CARRY_ATTEMPTS = 5;
+
 export async function upsertCanon(db: Queryable, input: CheckpointInput): Promise<void> {
-  const canonMarkdown = input.canonMarkdown ?? renderDefaultCanon(input);
-  await upsertCanonMarkdown(db, input.taskId, input.timestamp, canonMarkdown);
+  if (input.canonMarkdown !== undefined) {
+    await upsertCanonMarkdown(db, input.taskId, input.timestamp, input.canonMarkdown);
+    return;
+  }
+
+  // Carry-forward is read-merge-write: write only if the canon is still the one that was read.
+  for (let attempt = 0; attempt < CANON_CARRY_ATTEMPTS; attempt += 1) {
+    const previous = (await getCanon(db, input.taskId))?.canonMarkdown;
+    const canonMarkdown = normalizeCanon(input.taskId, input.timestamp, renderCarriedCanon(input, previous));
+    if (await writeCanonIfUnchanged(db, input.taskId, input.timestamp, canonMarkdown, previous)) return;
+  }
+  throw new Error(`canon for ${input.taskId} changed during ${CANON_CARRY_ATTEMPTS} carry-forward attempts; retry the checkpoint`);
+}
+
+async function writeCanonIfUnchanged(db: Queryable, taskId: string, lastReconciled: string, canonMarkdown: string, previous: string | undefined): Promise<boolean> {
+  const result = previous === undefined
+    ? await db.query(
+        `INSERT INTO continuity.canons (task_id, last_reconciled, canon_markdown, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (task_id) DO NOTHING`,
+        [taskId, lastReconciled, canonMarkdown],
+      )
+    : await db.query(
+        `UPDATE continuity.canons
+         SET last_reconciled = $2, canon_markdown = $3, updated_at = now()
+         WHERE task_id = $1 AND canon_markdown = $4`,
+        [taskId, lastReconciled, canonMarkdown, previous],
+      );
+  return result.rowCount === 1;
+}
+
+function normalizeCanon(taskId: string, lastReconciled: string, canonMarkdown: string): string {
+  assertCanonTaskId(canonMarkdown, taskId);
+  return withLastReconciled(canonMarkdown, lastReconciled);
 }
 
 export async function upsertCanonMarkdown(db: Queryable, taskId: string, lastReconciled: string, canonMarkdown: string): Promise<void> {
-  assertCanonTaskId(canonMarkdown, taskId);
-  const normalizedCanon = withLastReconciled(canonMarkdown, lastReconciled);
+  const normalizedCanon = normalizeCanon(taskId, lastReconciled, canonMarkdown);
   await db.query(
     `INSERT INTO continuity.canons (task_id, last_reconciled, canon_markdown, updated_at)
      VALUES ($1, $2, $3, now())

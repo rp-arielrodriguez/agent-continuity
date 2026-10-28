@@ -206,6 +206,12 @@ continuity resume \
   --task-id agent-continuity-decentralized-runtime
 ```
 
+A checkpoint without `--canon`/`--canon-file` carries the lane's previous canon
+forward: all sections are kept, `last-reconciled`, the status line, and
+`## LATEST-PROGRESS` are updated, and `## NEXT-ACTION` is replaced when `--next`
+is given. The default template is used only when no previous canon exists. Pass
+`--canon-file` to rewrite invariants, decisions, or rejections.
+
 `--project-id` is optional inside a git checkout with `remote.origin.url`; the
 CLI infers `<owner>/<repo>`. Use `--project-id <OWNER>/<REPO>` outside a git
 checkout or when the inferred project is not the desired continuity namespace.

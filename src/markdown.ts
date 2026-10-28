@@ -63,6 +63,63 @@ ${artifactsSection}
 `;
 }
 
+/**
+ * Build the canon for a checkpoint that carries no explicit canon.
+ * With a previous canon, every section is preserved; only last-reconciled,
+ * the status line, LATEST-PROGRESS and (when given) NEXT-ACTION change.
+ */
+export function renderCarriedCanon(input: CheckpointInput, previousCanon: string | null | undefined): string {
+  if (!previousCanon || !previousCanon.trim()) return renderDefaultCanon(input);
+
+  // A CRLF canon file would otherwise hide every heading behind a trailing `\r`.
+  let canon = withLastReconciled(previousCanon.replace(/\r\n?/g, "\n"), input.timestamp);
+  canon = setStatusLine(canon, input.status);
+  canon = setSectionBody(canon, "LATEST-PROGRESS", `- ${input.progress}`, "NEXT-ACTION");
+  if (input.next !== undefined) canon = setSectionBody(canon, "NEXT-ACTION", `- ${input.next}`);
+  return canon;
+}
+
+function setStatusLine(canon: string, status: string): string {
+  const lines = canon.split("\n");
+  const prose = proseLines(lines);
+  const index = lines.findIndex((line, i) => prose[i] && /^- Current checkpoint status: .*\.$/.test(line));
+  if (index >= 0) lines[index] = `- Current checkpoint status: ${status}.`;
+  return lines.join("\n");
+}
+
+// Replace the body of `## <name>` (or the heading line starting with it); create it
+// before `beforeName` (or at the end) when missing.
+function setSectionBody(canon: string, name: string, body: string, beforeName?: string): string {
+  const lines = canon.split("\n");
+  const prose = proseLines(lines);
+  const isSection = (i: number) => prose[i] && lines[i].startsWith("## ");
+  const isHeading = (i: number, n: string) => isSection(i) && (lines[i].trimEnd() === `## ${n}` || lines[i].startsWith(`## ${n} `));
+  const start = lines.findIndex((_, i) => isHeading(i, name));
+  if (start >= 0) {
+    let end = lines.findIndex((_, i) => i > start && isSection(i));
+    if (end < 0) end = lines.length;
+    return [...lines.slice(0, start + 1), body, "", ...lines.slice(end)].join("\n");
+  }
+  const section = [`## ${name}`, body, ""];
+  const before = beforeName ? lines.findIndex((_, i) => isHeading(i, beforeName)) : -1;
+  if (before >= 0) return [...lines.slice(0, before), ...section, ...lines.slice(before)].join("\n");
+  return [canon.trimEnd(), "", ...section].join("\n");
+}
+
+// Marks the lines outside fenced code blocks, so a fenced example never counts as canon structure.
+function proseLines(lines: string[]): boolean[] {
+  let fence: string | undefined;
+  return lines.map((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/)?.[1];
+    if (!fence) {
+      if (marker) fence = marker;
+      return !marker;
+    }
+    if (marker?.[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = undefined;
+    return false;
+  });
+}
+
 function isDaemonSource(source: string | undefined): boolean {
   return Boolean(source?.startsWith("daemon") || source?.startsWith("agent-") || source === "scheduler-worker");
 }

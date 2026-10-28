@@ -1,5 +1,5 @@
 import type { CheckpointPayload, ContinuitySigner, LaneRef, TaskBlock } from "./block.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderDefaultCanon, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, withLastReconciled } from "./markdown.js";
 import type { ContinuityProvider, LaneStatus, ProviderSubmitResult } from "./provider.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import type { CheckpointInput } from "./types.js";
@@ -66,8 +66,10 @@ export async function runDaemonCheckpoint(input: DaemonCheckpointInput): Promise
     };
   }
 
-  const ready = await ensureWritableLane(input.provider, lane, signerState.signer, input);
-  const canonMarkdown = normalizedCanon(input);
+  const { status: ready, bootstrapped } = await ensureWritableLane(input.provider, lane, signerState.signer, input);
+  // Carry the canon from the snapshot whose tip guards the write, so a concurrent update is never dropped.
+  // A lane bootstrapped just now has no previous canon, so the first checkpoint keeps the template.
+  const canonMarkdown = normalizedCanon(input, bootstrapped ? null : ready.lane.canonMarkdown);
   const checkpoint = await submitRequired(
     await input.provider.checkpoint({
       ...lane,
@@ -132,11 +134,12 @@ async function ensureWritableLane(
   lane: LaneRef,
   signer: ContinuitySigner,
   input: DaemonCheckpointInput,
-): Promise<LaneStatus> {
+): Promise<{ status: LaneStatus; bootstrapped: boolean }> {
   let status = await provider.status({ ...lane, actor: signer, now: input.timestamp });
   if (status.action === "pause") throw new Error(status.reason ?? `lane is owned by another actor`);
 
-  if (!status.lane.tip) {
+  const bootstrapped = !status.lane.tip;
+  if (bootstrapped) {
     const bootstrap = await submitRequired(
       await provider.bootstrap({
         ...lane,
@@ -169,11 +172,11 @@ async function ensureWritableLane(
     status = { lane: claim.lane, action: "continue" };
   }
 
-  return status;
+  return { status, bootstrapped };
 }
 
-function normalizedCanon(input: CheckpointInput): string {
-  const canonMarkdown = input.canonMarkdown ?? renderDefaultCanon({ ...input, source: input.source ?? "daemon-cli" });
+function normalizedCanon(input: CheckpointInput, previousCanon?: string | null): string {
+  const canonMarkdown = input.canonMarkdown ?? renderCarriedCanon({ ...input, source: input.source ?? "daemon-cli" }, previousCanon);
   assertCanonTaskId(canonMarkdown, input.taskId);
   return withLastReconciled(canonMarkdown, input.timestamp);
 }
