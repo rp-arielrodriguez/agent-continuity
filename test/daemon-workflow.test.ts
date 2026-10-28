@@ -160,3 +160,27 @@ last-reconciled: 2026-07-04T00:30:00.000Z
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+test("daemon carried canon comes from the snapshot that guards the write", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  try {
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:40:00.000Z", progress: "Old.", canonMarkdown: `# Canon: ${ref.taskId}\n\n## DECISIONS\n- OLD-DECISION.\n` });
+    const staleStatus = await provider.status(ref);
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-07-04T00:41:00.000Z", progress: "Newer.", canonMarkdown: `# Canon: ${ref.taskId}\n\n## DECISIONS\n- INTERVENING-DECISION.\n` });
+
+    // The first status read returns the snapshot from before the intervening canon update.
+    let statusReads = 0;
+    const racingProvider = Object.create(provider) as MemoryProvider;
+    racingProvider.status = async (input) => (statusReads++ === 0 ? staleStatus : provider.status(input));
+    await runDaemonCheckpoint({ ...base, provider: racingProvider, timestamp: "2026-07-04T00:42:00.000Z", progress: "Progress only." });
+
+    const carried = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(carried, /INTERVENING-DECISION/);
+    assert.doesNotMatch(carried, /OLD-DECISION/);
+    assert.match(carried, /## LATEST-PROGRESS\n- Progress only\.\n/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});

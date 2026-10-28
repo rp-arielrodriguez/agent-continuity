@@ -129,3 +129,24 @@ test("carried canon falls back to the default template without a previous canon"
   assert.equal(renderCarriedCanon(input, null), renderDefaultCanon(input));
   assert.equal(renderCarriedCanon(input, undefined), renderDefaultCanon(input));
 });
+
+test("carried canon ignores section headings inside fenced code blocks", () => {
+  const fenced = previousCanon.replace(
+    "- INVARIANT-X: the review gate is required.\n",
+    "- INVARIANT-X: the review gate is required.\n\n```markdown\n## NEXT-ACTION\n- Example next action.\n\n## LATEST-PROGRESS\n- Example progress.\n- Current checkpoint status: example.\n```\n- After the example.\n",
+  );
+  const canon = renderCarriedCanon(input, fenced);
+  assert.match(canon, /```markdown\n## NEXT-ACTION\n- Example next action\.\n\n## LATEST-PROGRESS\n- Example progress\.\n- Current checkpoint status: example\.\n```\n- After the example\./);
+  assert.match(canon, /- Current checkpoint status: completed\./);
+  assert.match(canon, /\n## LATEST-PROGRESS\n- Validated durable checkpoint writes\.\n\n## NEXT-ACTION\n- Install integrations\.\n$/);
+  assert.doesNotMatch(canon, /Old next action/);
+});
+
+test("carried canon reads CRLF canon files without duplicating sections", () => {
+  const canon = renderCarriedCanon(input, previousCanon.replace(/\n/g, "\r\n"));
+  assert.doesNotMatch(canon, /\r/);
+  assert.equal(canon.match(/## NEXT-ACTION/g)?.length, 1);
+  assert.equal(canon.match(/## LATEST-PROGRESS/g)?.length, 1);
+  assert.match(canon, /## NEXT-ACTION\n- Install integrations\.\n/);
+  assert.doesNotMatch(canon, /Old next action/);
+});
