@@ -59,6 +59,22 @@ export interface CheckpointInput {
   canonMarkdown?: string;
   checkpointDir?: string;
   source?: string;
+  /** Lines appended to `## DECISIONS`, `## REJECTED` and `## OPEN`; they survive later checkpoints. */
+  decisions?: string[];
+  rejected?: string[];
+  open?: string[];
+  /** Each entry must match exactly one open canon item, which the checkpoint removes. */
+  resolve?: string[];
+}
+
+export interface OpenCanonItem {
+  section: string;
+  text: string;
+}
+
+export interface CanonReport {
+  openItems: OpenCanonItem[];
+  warnings: string[];
 }
 
 export interface JournalEntry extends CheckpointInput {
@@ -80,3 +96,5 @@ export interface ReconcileResult {
   journalPath: string;
   canonPath: string;
 }
+
+export interface CheckpointResult extends ReconcileResult, CanonReport {}

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { assertCanonTaskId, idempotencyKeyFor, lastReconciledFromCanon, parseJournalEntries, renderCarriedCanon, renderDefaultCanon, renderJournalEntry, withLastReconciled } from "../src/markdown.js";
+import { assertCanonTaskId, checkpointCanonReport, idempotencyKeyFor, lastReconciledFromCanon, openCanonItems, parseJournalEntries, renderCarriedCanon, renderCheckpointCanon, renderDefaultCanon, renderJournalEntry, withLastReconciled } from "../src/markdown.js";
 import type { CheckpointInput } from "../src/types.js";
 
 const input: CheckpointInput = {
@@ -149,4 +149,127 @@ test("carried canon reads CRLF canon files without duplicating sections", () => 
   assert.equal(canon.match(/## LATEST-PROGRESS/g)?.length, 1);
   assert.match(canon, /## NEXT-ACTION\n- Install integrations\.\n/);
   assert.doesNotMatch(canon, /Old next action/);
+});
+
+// Shape of the 2026-11-01 incident canon: prose lines, an OPEN section with an "Awaiting" line.
+const incidentCanon = `last-reconciled: 2026-11-01T04:00:06.218Z
+## SOURCE-OF-TRUTH
+Review lane e2e-failure-review.
+
+## DECISIONS
+Option B (DR idleTimeout 20s) + narrowed VS retries.
+
+## OPEN DESIGN (side topic, not started)
+Liga CLI has no setter for compute.profile. Ariel rejected 'liga preview compute set stable'. Awaiting Ariel's choice.
+Ariel concern: file state under concurrency (2 agents, same repo/branch).
+
+## LATEST-PROGRESS
+- NEXT-ACTION 1 DONE.
+
+## NEXT-ACTION
+- NEXT-ACTION 2: decide compute.profile CLI shape with Ariel.
+`;
+
+const decision = "compute.profile CLI shape: apply flag that persists to .liga/preview.yaml.";
+
+test("a decision recorded with --decision survives the next progress-only checkpoint and closes its open item", () => {
+  const decided = renderCheckpointCanon(
+    { ...input, progress: "Ariel decided the compute CLI shape.", next: "Parent lane.", decisions: [decision], resolve: ["awaiting ariel's choice"] },
+    incidentCanon,
+  );
+  const later = renderCheckpointCanon({ ...input, progress: "Unrelated progress.", next: undefined }, decided);
+
+  assert.match(later, new RegExp(`## DECISIONS\\nOption B \\(DR idleTimeout 20s\\) \\+ narrowed VS retries\\.\\n- ${decision.replace(/[.()]/g, "\\$&")}\\n`));
+  assert.doesNotMatch(later, /Awaiting Ariel's choice/);
+  assert.match(later, /## OPEN DESIGN \(side topic, not started\)\nAriel concern: file state under concurrency/);
+  assert.match(later, /## LATEST-PROGRESS\n- Unrelated progress\.\n/);
+  assert.deepEqual(openCanonItems(later).map((item) => item.text), ["Ariel concern: file state under concurrency (2 agents, same repo/branch)."]);
+});
+
+test("a progress-only checkpoint reports carried open items and warns when progress reads like a decision", () => {
+  const canon = renderCheckpointCanon({ ...input, progress: "Ariel decided the compute CLI shape." }, incidentCanon);
+  const report = checkpointCanonReport({ ...input, progress: "Ariel decided the compute CLI shape." }, canon);
+
+  assert.deepEqual(report.openItems.map((item) => item.section), ["OPEN DESIGN (side topic, not started)", "OPEN DESIGN (side topic, not started)"]);
+  assert.match(report.openItems[0].text, /Awaiting Ariel's choice\.$/);
+  assert.equal(report.warnings.length, 1);
+  assert.match(report.warnings[0], /--decision/);
+  assert.match(report.warnings[0], /--resolve/);
+
+  const quiet = checkpointCanonReport({ ...input, progress: "Ran the tests." }, canon);
+  assert.equal(quiet.openItems.length, 2);
+  assert.deepEqual(quiet.warnings, []);
+
+  const unresolved = checkpointCanonReport({ ...input, decisions: [decision] }, canon);
+  assert.match(unresolved.warnings[0], /2 open items remain/);
+});
+
+test("--decision is idempotent across checkpoints and inside one call", () => {
+  const once = renderCheckpointCanon({ ...input, decisions: [decision, ` ${decision} `] }, incidentCanon);
+  const twice = renderCheckpointCanon({ ...input, decisions: [`- ${decision}`] }, once);
+  assert.equal(twice.split(decision).length - 1, 1);
+  assert.equal(renderCheckpointCanon({ ...input, decisions: ["Option B (DR idleTimeout 20s) + narrowed VS retries."] }, incidentCanon).match(/Option B/g)?.length, 1);
+});
+
+test("--resolve that matches no open item or several open items fails without a canon", () => {
+  assert.throws(
+    () => renderCheckpointCanon({ ...input, decisions: [decision], resolve: ["no such item"] }, incidentCanon),
+    /no open item matches --resolve "no such item"; open items: \[OPEN DESIGN \(side topic, not started\)\] Liga CLI/,
+  );
+  assert.throws(() => renderCheckpointCanon({ ...input, resolve: ["Ariel"] }, incidentCanon), /--resolve "Ariel" matches 2 open items/);
+  assert.throws(() => renderCheckpointCanon({ ...input, resolve: ["x"] }, null), /no open item matches --resolve "x"; open items: none/);
+  assert.throws(() => renderCheckpointCanon({ ...input, decisions: ["  "] }, incidentCanon), /--decision must not be empty/);
+});
+
+test("canon edits create missing sections in canonical order and drop an emptied open section", () => {
+  const canon = renderCheckpointCanon(
+    { ...input, open: ["Pick a name. Awaiting review."], rejected: ["Global edits."] },
+    previousCanon,
+  );
+  assert.match(canon, /## REJECTED \(do not re-derive\)\n- REJECTED-Z: skipping the gate\.\n- Global edits\.\n\n## OPEN\n- Pick a name\. Awaiting review\.\n\n## LATEST-PROGRESS/);
+
+  const decided = renderCheckpointCanon({ ...input, decisions: ["Name is X."], resolve: ["pick a name"] }, canon);
+  assert.doesNotMatch(decided, /## OPEN\b/);
+  assert.match(decided, /- DECISION-Y: use the loop design\.\n- Name is X\.\n/);
+
+  const bare = renderCheckpointCanon({ ...input, decisions: ["First decision."] }, "# Canon: demo-task\n\n## NEXT-ACTION\n- Go.\n");
+  assert.match(bare, /## DECISIONS\n- First decision\.\n\n## LATEST-PROGRESS/);
+});
+
+test("open items come from OPEN sections and awaiting lines, never from fenced, decided or rejected text", () => {
+  const canon = `# Canon: demo-task
+
+## CURRENT-TRUTH
+- Awaiting SRE on the mesh fix.
+\`\`\`text
+## OPEN
+- Fenced example. Awaiting nothing.
+\`\`\`
+
+## DECISIONS
+- Stopped awaiting the old vendor.
+
+## OPEN QUESTIONS
+- None.
+- Which pool?
+`;
+  assert.deepEqual(openCanonItems(canon), [
+    { section: "CURRENT-TRUTH", text: "- Awaiting SRE on the mesh fix." },
+    { section: "OPEN QUESTIONS", text: "- Which pool?" },
+  ]);
+});
+
+test("canon edits also apply on top of an explicit canon, and no edits keep the PR #1 behavior", () => {
+  assert.equal(renderCheckpointCanon(input, previousCanon), renderCarriedCanon(input, previousCanon));
+  const explicit = renderCheckpointCanon({ ...input, canonMarkdown: previousCanon, decisions: ["Explicit plus decision."] }, "ignored");
+  assert.match(explicit, /- DECISION-Y: use the loop design\.\n- Explicit plus decision\.\n/);
+  assert.match(explicit, /## NEXT-ACTION\n- Old next action\.\n/);
+});
+
+test("--resolve matches the previous canon, so it can close an awaiting NEXT-ACTION line that --next replaces", () => {
+  const canon = "# Canon: demo-task\n\n## NEXT-ACTION\n- Awaiting Ariel's pick of the flag name.\n";
+  const decided = renderCheckpointCanon({ ...input, next: "Implement --profile.", decisions: ["Flag name is --profile."], resolve: ["awaiting ariel"] }, canon);
+  assert.match(decided, /## DECISIONS\n- Flag name is --profile\.\n/);
+  assert.match(decided, /## NEXT-ACTION\n- Implement --profile\.\n$/);
+  assert.deepEqual(openCanonItems(decided), []);
 });

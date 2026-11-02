@@ -210,7 +210,36 @@ A checkpoint without `--canon`/`--canon-file` carries the lane's previous canon
 forward: all sections are kept, `last-reconciled`, the status line, and
 `## LATEST-PROGRESS` are updated, and `## NEXT-ACTION` is replaced when `--next`
 is given. The default template is used only when no previous canon exists. Pass
-`--canon-file` to rewrite invariants, decisions, or rejections.
+`--canon-file` to rewrite the full canon.
+
+The next checkpoint replaces `## LATEST-PROGRESS`, so a decision written only in
+`--progress` does not survive. Record the decision and close the open item that
+it settles in the same call:
+
+```bash
+continuity checkpoint --daemon --project-id PROJECT --task-id TASK \
+  --progress "Ariel chose the apply flag." --next "Implement the flag." \
+  --decision "compute.profile: apply flag that persists to .liga/preview.yaml." \
+  --resolve "Awaiting Ariel's choice"
+```
+
+- `--decision`, `--rejected`, and `--open` (each repeatable) append `- <text>` to
+  `## DECISIONS`, `## REJECTED`, and `## OPEN`. A missing section is created. A
+  line that the section already holds is not added again.
+- `--resolve <text>` (repeatable) removes the one open item that contains
+  `<text>` (case-insensitive). It matches the canon before this checkpoint
+  replaces `## NEXT-ACTION`. Open items are the lines of `## OPEN...` sections,
+  plus lines that contain "awaiting" in other sections except `DECISIONS`,
+  `REJECTED`, and `LATEST-PROGRESS`. Fenced lines do not count. If no item or more
+  than one item matches, the checkpoint fails and writes nothing. An `OPEN`
+  section with no lines left is removed.
+- The edits also apply on top of `--canon`/`--canon-file`. `save` accepts the
+  same flags.
+- Checkpoint output lists the open items that remain. It warns when a decision
+  has no `--resolve`, or when `--progress` reads like a decision. The warning
+  never blocks the checkpoint. `--json` returns `openItems` and `warnings`.
+- `continuity resume` prints an `<open-items>` block above the canon when the
+  canon has open items. `resume --json` adds `openItems`.
 
 `--project-id` is optional inside a git checkout with `remote.origin.url`; the
 CLI infers `<owner>/<repo>`. Use `--project-id <OWNER>/<REPO>` outside a git

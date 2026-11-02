@@ -184,3 +184,87 @@ test("daemon carried canon comes from the snapshot that guards the write", async
     await rm(stateDir, { recursive: true, force: true });
   }
 });
+
+const incidentCanon = `# Canon: ${ref.taskId}
+
+## DECISIONS
+Option B (DR idleTimeout 20s) + narrowed VS retries.
+
+## OPEN DESIGN
+Liga CLI has no setter for compute.profile. Awaiting Ariel's choice.
+Ariel concern: file state under concurrency.
+
+## NEXT-ACTION
+- Decide compute.profile CLI shape with Ariel.
+`;
+
+test("daemon checkpoint keeps a recorded decision and closes its open item across later checkpoints", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  try {
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T04:00:00.000Z", progress: "Seed.", canonMarkdown: incidentCanon });
+    const open = await runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T04:01:00.000Z", progress: "Ariel decided the compute CLI shape." });
+    assert.equal(open.openItems.length, 2);
+    assert.match(open.warnings[0] ?? "", /--decision/);
+
+    const decided = await runDaemonCheckpoint({
+      ...base,
+      timestamp: "2026-11-01T04:02:00.000Z",
+      progress: "Recorded the compute decision.",
+      decisions: ["Compute CLI shape: persisted apply flag."],
+      resolve: ["Awaiting Ariel's choice"],
+    });
+    assert.deepEqual(decided.openItems, [{ section: "OPEN DESIGN", text: "Ariel concern: file state under concurrency." }]);
+    assert.deepEqual(decided.warnings, []);
+
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T04:03:00.000Z", progress: "Unrelated progress." });
+    const canon = (await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "";
+    assert.match(canon, /## DECISIONS\nOption B \(DR idleTimeout 20s\) \+ narrowed VS retries\.\n- Compute CLI shape: persisted apply flag\.\n/);
+    assert.doesNotMatch(canon, /Awaiting Ariel's choice/);
+    assert.match(canon, /## LATEST-PROGRESS\n- Unrelated progress\.\n/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon checkpoint with an unknown --resolve writes no block, not even a bootstrap or claim", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  try {
+    await assert.rejects(
+      runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T05:00:00.000Z", progress: "New lane.", resolve: ["anything"] }),
+      /no open item matches --resolve "anything"; open items: none/,
+    );
+    assert.equal((await provider.blocks(ref)).length, 0);
+
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T05:01:00.000Z", progress: "Seed.", canonMarkdown: incidentCanon });
+    const before = await provider.blocks(ref);
+    await assert.rejects(
+      runDaemonCheckpoint({ ...base, actorId: "other-actor", timestamp: "2026-11-01T05:02:00.000Z", progress: "Decided.", decisions: ["X."], resolve: ["no such item"] }),
+      /no open item matches --resolve "no such item"/,
+    );
+    assert.equal((await provider.blocks(ref)).length, before.length);
+    assert.match((await readDaemonCanon({ ...ref, provider })).canonMarkdown ?? "", /Awaiting Ariel's choice/);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("daemon checkpoint retry with the same idempotency key returns the existing block after its --resolve applied", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "continuity-daemon-workflow-"));
+  const provider = new MemoryProvider();
+  const base = { ...ref, provider, stateDir, modelId: "test-model", sessionId: "session-1", status: "in_progress" as const };
+  try {
+    await runDaemonCheckpoint({ ...base, timestamp: "2026-11-01T06:00:00.000Z", progress: "Seed.", canonMarkdown: incidentCanon });
+    const decided = { ...base, timestamp: "2026-11-01T06:01:00.000Z", progress: "Decided.", decisions: ["X."], resolve: ["Awaiting Ariel's choice"] };
+    const first = await runDaemonCheckpoint(decided);
+    const retry = await runDaemonCheckpoint(decided);
+    assert.equal(retry.appended, false);
+    assert.equal(retry.blockId, first.blockId);
+    assert.deepEqual(retry.openItems, first.openItems);
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});

@@ -16,6 +16,7 @@ import { daemonStatus, startDaemon, stopDaemon } from "./daemon-lifecycle.js";
 import { daemonConfigFromInstallResult, defaultDaemonRuntimeConfig, installDaemonRuntime } from "./daemon-install.js";
 import { LocalDaemonProvider, type OverlayDiscoveryProvider } from "./daemon-provider.js";
 import { readDaemonCanon, runDaemonCheckpoint } from "./daemon-workflow.js";
+import { openCanonItems, truncateLine } from "./markdown.js";
 import { installAgentContinuity, type InstallTarget } from "./install.js";
 import { migratePostgresTaskToProvider } from "./migration.js";
 import {
@@ -65,7 +66,7 @@ import {
 import { loadOrCreateNodeSigner } from "./signer-store.js";
 import { backupRuntime, doctor, installProduct, setupLocal, startRuntime, stopRuntime, uninstallProduct, type ActionReport } from "./setup.js";
 import { continuityStatus, importCheckpoint, readCanon, reconcileCanon, runCheckpoint } from "./workflow.js";
-import type { ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
+import type { CanonReport, CheckpointInput, ContinuityConfig, DaemonRuntimeConfig } from "./types.js";
 import type {
   LaneSnapshotPayload,
   RunEventPayload,
@@ -80,6 +81,8 @@ import type {
 interface ParsedArgs {
   command: string;
   options: Record<string, string | boolean>;
+  // Every value of each option, in order; `options` keeps the last one.
+  values?: Record<string, string[]>;
 }
 
 async function main(argv: string[]): Promise<void> {
@@ -152,6 +155,7 @@ async function main(argv: string[]): Promise<void> {
         canonMarkdown: canonFile ? await readFile(canonFile, "utf8") : stringOption(parsed, "canon"),
         checkpointDir: stringOption(parsed, "checkpoint-dir"),
         source: stringOption(parsed, "source") ?? (parsed.options.daemon === true ? "daemon-cli" : "cli"),
+        ...canonEditOptions(parsed),
       });
       if (parsed.options.daemon === true) {
         const daemon = daemonRuntimeFromOptions(parsed, config);
@@ -178,7 +182,7 @@ Lane: ${result.laneId}
 Block: ${result.blockId ?? "<none>"}
 Tip: ${result.finalTip ?? "<empty>"}
 Actor: ${result.actor.nodeId}/${result.actor.actorId}
-Summary: ${input.progress}
+Summary: ${input.progress}${checkpointReportSuffix(result)}
 </checkpoint>`);
         }
         return;
@@ -193,7 +197,7 @@ Summary: ${input.progress}
 Status: ${result.appended ? "Appended checkpoint entry" : "Checkpoint entry already existed"}
 File: ${result.journalPath}
 Canon: ${result.canonPath}
-Summary: ${input.progress}
+Summary: ${input.progress}${checkpointReportSuffix(result)}
 </checkpoint>`);
       }
       return;
@@ -214,14 +218,14 @@ Summary: ${input.progress}
           provider,
         });
         if (!result.canonMarkdown) throw new Error(`no daemon canon found for ${result.projectId}/${result.taskId}/${result.laneId}`);
-        if (parsed.options.json) console.log(JSON.stringify({ ...result, sync }, null, 2));
-        else console.log(result.canonMarkdown.endsWith("\n") ? result.canonMarkdown.trimEnd() : result.canonMarkdown);
+        if (parsed.options.json) console.log(JSON.stringify({ ...result, openItems: openCanonItems(result.canonMarkdown), sync }, null, 2));
+        else console.log(`${openItemsHeader(result.canonMarkdown)}${result.canonMarkdown.endsWith("\n") ? result.canonMarkdown.trimEnd() : result.canonMarkdown}`);
         return;
       }
       requireDatabaseConfig(config);
       const canon = await readCanon(taskId, config);
       if (!canon) throw new Error(`no canon found for task ${taskId}`);
-      console.log(canon.endsWith("\n") ? canon.trimEnd() : canon);
+      console.log(`${openItemsHeader(canon)}${canon.endsWith("\n") ? canon.trimEnd() : canon}`);
       return;
     }
     case "reconcile": {
@@ -386,6 +390,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         canonMarkdown: canonFile ? await readFile(canonFile, "utf8") : stringOption(parsed, "canon"),
         checkpointDir: stringOption(parsed, "checkpoint-dir"),
         source: stringOption(parsed, "source") ?? "agent-save",
+        ...canonEditOptions(parsed),
       });
       const result = await runDaemonCheckpoint({
         ...input,
@@ -405,6 +410,7 @@ Summary: ${taskId} imported ${result.imported} new journal entries
         console.log(`lane: ${result.laneId}`);
         console.log(`block: ${result.blockId ?? "<none>"}`);
         console.log(`tip: ${result.finalTip ?? "<empty>"}`);
+        for (const line of canonReportLines(result, { open: "open-items", warning: "warning" })) console.log(line);
       }
       return;
     }
@@ -1566,6 +1572,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     rest = ["--help", ...rest.slice(1)];
   }
   const options: Record<string, string | boolean> = {};
+  const values: Record<string, string[]> = {};
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i];
     if (arg === "-h") {
@@ -1580,15 +1587,49 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     options[key] = next;
+    (values[key] ??= []).push(next);
     i += 1;
   }
-  return { command, options };
+  return { command, options, values };
 }
 
 function stringOption(parsed: ParsedArgs, name: string): string | undefined {
   const value = parsed.options[name];
   if (typeof value === "boolean") return undefined;
   return value;
+}
+
+function repeatedOption(parsed: ParsedArgs, name: string): string[] | undefined {
+  if (parsed.options[name] === true) throw new Error(`--${name} requires a value`);
+  return parsed.values?.[name];
+}
+
+function canonEditOptions(parsed: ParsedArgs): Pick<CheckpointInput, "decisions" | "rejected" | "open" | "resolve"> {
+  return {
+    decisions: repeatedOption(parsed, "decision"),
+    rejected: repeatedOption(parsed, "rejected"),
+    open: repeatedOption(parsed, "open"),
+    resolve: repeatedOption(parsed, "resolve"),
+  };
+}
+
+function canonReportLines(report: CanonReport, labels: { open: string; warning: string }): string[] {
+  const lines = report.openItems.length > 0 ? [`${labels.open}: ${report.openItems.length} (close with --resolve <text>)`] : [];
+  for (const item of report.openItems) lines.push(`- [${item.section}] ${truncateLine(item.text, 100)}`);
+  for (const warning of report.warnings) lines.push(`${labels.warning}: ${warning}`);
+  return lines;
+}
+
+function checkpointReportSuffix(report: CanonReport): string {
+  return canonReportLines(report, { open: "Open items", warning: "Warning" }).map((line) => `\n${line}`).join("");
+}
+
+// Printed above the canon on resume, so a new session sees what is still open first.
+function openItemsHeader(canonMarkdown: string): string {
+  const items = openCanonItems(canonMarkdown);
+  if (items.length === 0) return "";
+  const lines = items.map((item) => `- [${item.section}] ${truncateLine(item.text, 160)}`);
+  return `<open-items count="${items.length}">\n${lines.join("\n")}\n</open-items>\n`;
 }
 
 function numberOption(parsed: ParsedArgs, name: string): number | undefined {

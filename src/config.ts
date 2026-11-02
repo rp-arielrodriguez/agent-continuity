@@ -111,6 +111,10 @@ export function defaultCheckpointInput(partial: Partial<CheckpointInput>): Check
     canonMarkdown: partial.canonMarkdown,
     checkpointDir: partial.checkpointDir,
     source: partial.source,
+    decisions: partial.decisions,
+    rejected: partial.rejected,
+    open: partial.open,
+    resolve: partial.resolve,
   };
 }
 

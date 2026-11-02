@@ -1,8 +1,8 @@
 import type { CheckpointPayload, ContinuitySigner, LaneRef, TaskBlock } from "./block.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, checkpointCanonReport, idempotencyKeyFor, renderCheckpointCanon, withLastReconciled } from "./markdown.js";
 import type { ContinuityProvider, LaneStatus, ProviderSubmitResult } from "./provider.js";
 import { loadOrCreateNodeSigner } from "./signer-store.js";
-import type { CheckpointInput } from "./types.js";
+import type { CanonReport, CheckpointInput } from "./types.js";
 
 const DEFAULT_ACTOR_ID = "agent-cli";
 const DEFAULT_LEASE_MS = 10 * 60 * 1000;
@@ -19,7 +19,7 @@ export interface DaemonCheckpointInput extends CheckpointInput, LaneRef, DaemonW
   leaseUntil?: string;
 }
 
-export interface DaemonCheckpointResult extends LaneRef {
+export interface DaemonCheckpointResult extends LaneRef, CanonReport {
   appended: boolean;
   blockId?: string;
   finalTip?: string;
@@ -57,6 +57,7 @@ export async function runDaemonCheckpoint(input: DaemonCheckpointInput): Promise
     const current = await input.provider.status({ ...lane, actor: signerState.signer });
     return {
       ...lane,
+      ...checkpointCanonReport(input, current.lane.canonMarkdown),
       appended: false,
       blockId: existing.blockId,
       finalTip: current.lane.tip,
@@ -66,6 +67,8 @@ export async function runDaemonCheckpoint(input: DaemonCheckpointInput): Promise
     };
   }
 
+  // Fail before the bootstrap or claim writes when the canon edits do not apply (unknown --resolve).
+  normalizedCanon(input, status.lane.tip ? status.lane.canonMarkdown : null);
   const { status: ready, bootstrapped } = await ensureWritableLane(input.provider, lane, signerState.signer, input);
   // Carry the canon from the snapshot whose tip guards the write, so a concurrent update is never dropped.
   // A lane bootstrapped just now has no previous canon, so the first checkpoint keeps the template.
@@ -94,6 +97,7 @@ export async function runDaemonCheckpoint(input: DaemonCheckpointInput): Promise
 
   return {
     ...lane,
+    ...checkpointCanonReport(input, canonMarkdown),
     appended: true,
     blockId: checkpoint.block?.blockId,
     finalTip: checkpoint.lane.tip,
@@ -176,7 +180,7 @@ async function ensureWritableLane(
 }
 
 function normalizedCanon(input: CheckpointInput, previousCanon?: string | null): string {
-  const canonMarkdown = input.canonMarkdown ?? renderCarriedCanon({ ...input, source: input.source ?? "daemon-cli" }, previousCanon);
+  const canonMarkdown = renderCheckpointCanon({ ...input, source: input.source ?? "daemon-cli" }, previousCanon);
   assertCanonTaskId(canonMarkdown, input.taskId);
   return withLastReconciled(canonMarkdown, input.timestamp);
 }
