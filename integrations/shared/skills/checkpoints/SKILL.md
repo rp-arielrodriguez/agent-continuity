@@ -71,6 +71,12 @@ and next action. Continuity owns signed persistence and projections.
 When current truth changes, checkpoint through the daemon and reconcile the
 canon in the same operation. Never edit exported markdown as authority.
 
+Each checkpoint replaces progress and next action. A decision written only
+there is lost at the next checkpoint. Record the decision as a durable canon
+line, and close the open item it settles in the same call. Read the open items
+that the checkpoint and resume output list; do not present a decided topic as
+open. The `checkpoint` contract names the flags.
+
 If the daemon is unavailable, report that explicitly. Use PostgreSQL/Absurd
 compatibility state only as an announced fallback, never silently.
 

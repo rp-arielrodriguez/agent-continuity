@@ -1,20 +1,21 @@
 import pg from "pg";
 import { Absurd, type TaskContext } from "absurd-sdk";
-import type { CheckpointInput, ContinuityConfig, ReconcileResult } from "./types.js";
+import type { CheckpointInput, CheckpointResult, ContinuityConfig, ReconcileResult } from "./types.js";
 import { ensureContinuitySchema } from "./schema.js";
-import { lastReconciledFromCanon, parseJournalEntries } from "./markdown.js";
-import { appendJournalEntry, exportTaskFiles, getCanon, getLatestJournalTimestamp, insertJournalEntries, upsertCanon, upsertCanonMarkdown } from "./store.js";
+import { checkpointCanonReport, lastReconciledFromCanon, parseJournalEntries } from "./markdown.js";
+import { appendJournalEntry, assertCanonEditsApply, exportTaskFiles, getCanon, getLatestJournalTimestamp, insertJournalEntries, upsertCanon, upsertCanonMarkdown } from "./store.js";
 
 const TASK_RECONCILE = "checkpoint.reconcile";
 const TASK_RECONCILE_CANON = "canon.reconcile";
 const TASK_IMPORT = "checkpoint.import";
 
-export async function runCheckpoint(input: CheckpointInput, config: ContinuityConfig): Promise<ReconcileResult> {
+export async function runCheckpoint(input: CheckpointInput, config: ContinuityConfig): Promise<CheckpointResult> {
   const pool = new pg.Pool({ connectionString: config.databaseUrl });
   const app = new Absurd({ db: pool, queueName: config.queueName });
 
   try {
     await ensureContinuitySchema(pool);
+    await assertCanonEditsApply(pool, input);
     registerContinuityTasks(app, pool, config);
     await app.createQueue(config.queueName);
 
@@ -40,7 +41,8 @@ export async function runCheckpoint(input: CheckpointInput, config: ContinuityCo
         throw new Error(`checkpoint task ${spawn.taskID} ended in state ${snapshot.state}`);
       }
 
-      return snapshot.result as unknown as ReconcileResult;
+      const canon = (await getCanon(pool, input.taskId))?.canonMarkdown;
+      return { ...(snapshot.result as unknown as ReconcileResult), ...checkpointCanonReport(input, canon) };
     } finally {
       await worker.close();
     }

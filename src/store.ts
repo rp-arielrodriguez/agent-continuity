@@ -1,7 +1,7 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { CanonRecord, CheckpointInput, JournalEntry } from "./types.js";
-import { assertCanonTaskId, idempotencyKeyFor, renderCarriedCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
+import { assertCanonTaskId, idempotencyKeyFor, renderCheckpointCanon, renderJournal, renderJournalEntry, withLastReconciled } from "./markdown.js";
 import type { Queryable } from "./schema.js";
 
 interface JournalRow {
@@ -73,17 +73,27 @@ const CANON_CARRY_ATTEMPTS = 5;
 
 export async function upsertCanon(db: Queryable, input: CheckpointInput): Promise<void> {
   if (input.canonMarkdown !== undefined) {
-    await upsertCanonMarkdown(db, input.taskId, input.timestamp, input.canonMarkdown);
+    await upsertCanonMarkdown(db, input.taskId, input.timestamp, renderCheckpointCanon(input, undefined));
     return;
   }
 
   // Carry-forward is read-merge-write: write only if the canon is still the one that was read.
   for (let attempt = 0; attempt < CANON_CARRY_ATTEMPTS; attempt += 1) {
     const previous = (await getCanon(db, input.taskId))?.canonMarkdown;
-    const canonMarkdown = normalizeCanon(input.taskId, input.timestamp, renderCarriedCanon(input, previous));
+    const canonMarkdown = normalizeCanon(input.taskId, input.timestamp, renderCheckpointCanon(input, previous));
     if (await writeCanonIfUnchanged(db, input.taskId, input.timestamp, canonMarkdown, previous)) return;
   }
   throw new Error(`canon for ${input.taskId} changed during ${CANON_CARRY_ATTEMPTS} carry-forward attempts; retry the checkpoint`);
+}
+
+// The checkpoint task appends the journal before it rewrites the canon, so run the canon
+// edits first: an unknown --resolve then fails before any write.
+export async function assertCanonEditsApply(db: Queryable, input: CheckpointInput): Promise<void> {
+  if (![input.decisions, input.rejected, input.open, input.resolve].some((edits) => edits?.length)) return;
+  // A retry of a checkpoint that already applied its edits must not fail on its own --resolve.
+  const retry = await db.query(`SELECT 1 FROM continuity.journal_entries WHERE idempotency_key = $1`, [idempotencyKeyFor(input)]);
+  if (retry.rowCount) return;
+  renderCheckpointCanon(input, (await getCanon(db, input.taskId))?.canonMarkdown);
 }
 
 async function writeCanonIfUnchanged(db: Queryable, taskId: string, lastReconciled: string, canonMarkdown: string, previous: string | undefined): Promise<boolean> {

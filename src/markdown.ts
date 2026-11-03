@@ -1,4 +1,4 @@
-import type { CheckpointInput, CheckpointStatus, JournalEntry } from "./types.js";
+import type { CanonReport, CheckpointInput, CheckpointStatus, JournalEntry, OpenCanonItem } from "./types.js";
 
 export function idempotencyKeyFor(input: CheckpointInput): string {
   return `${input.taskId}:${input.timestamp}:${input.sessionId}`;
@@ -77,6 +77,161 @@ export function renderCarriedCanon(input: CheckpointInput, previousCanon: string
   canon = setSectionBody(canon, "LATEST-PROGRESS", `- ${input.progress}`, "NEXT-ACTION");
   if (input.next !== undefined) canon = setSectionBody(canon, "NEXT-ACTION", `- ${input.next}`);
   return canon;
+}
+
+/**
+ * Build the canon a checkpoint writes: close the `resolve` items in the explicit or the
+ * previous canon, carry it forward, then append the checkpoint's new lines. Resolving
+ * before the carry lets `--resolve` close a line that `--next` replaces. Throws, before
+ * anything is written, when a `resolve` entry does not match exactly one open item.
+ */
+export function renderCheckpointCanon(input: CheckpointInput, previousCanon: string | null | undefined): string {
+  const resolve = editLines("resolve", input.resolve);
+  const resolved = (canon: string) => (resolve.length > 0 ? resolveOpenItems(canon.replace(/\r\n?/g, "\n"), resolve) : canon);
+  const canon = input.canonMarkdown !== undefined
+    ? resolved(input.canonMarkdown)
+    : renderCarriedCanon(input, resolve.length > 0 ? resolved(previousCanon ?? "") : previousCanon);
+  return appendCanonLines(canon, input);
+}
+
+/**
+ * Open items: the lines of `## OPEN...` sections, plus lines that say "awaiting" in any
+ * section except DECISIONS, REJECTED and LATEST-PROGRESS. Fenced lines never count.
+ */
+export function openCanonItems(canonMarkdown: string): OpenCanonItem[] {
+  return openItemLines(canonMarkdown.replace(/\r\n?/g, "\n").split("\n")).map(({ section, text }) => ({ section, text }));
+}
+
+// Surfaces open items after every checkpoint; the warnings are hints and never block a write.
+export function checkpointCanonReport(input: CheckpointInput, canonMarkdown: string | null | undefined): CanonReport {
+  const openItems = canonMarkdown ? openCanonItems(canonMarkdown) : [];
+  const warnings: string[] = [];
+  const remaining = `${plural(openItems.length, "open item")} remain${openItems.length === 1 ? "s" : ""}`;
+  const decisions = input.decisions?.length ?? 0;
+  if (openItems.length > 0 && decisions > 0 && !input.resolve?.length) {
+    warnings.push(`recorded ${plural(decisions, "decision")} but ${remaining}; close each decided item with --resolve <text>`);
+  } else if (openItems.length > 0 && decisions === 0 && DECISION_WORDS.test(input.progress)) {
+    warnings.push(`progress reads like a decision but ${remaining}; record it with --decision <text> and close the item with --resolve <text>`);
+  }
+  return { openItems, warnings };
+}
+
+const OPEN_SECTION = /^OPEN\b/i;
+const NO_OPEN_ITEMS_SECTION = /^(DECISIONS|REJECTED|LATEST-PROGRESS)\b/i;
+const AWAITING = /\bawaiting\b/i;
+const NONE_ITEM = /^(?:[-*]\s+)?none\.?$/i;
+const DECISION_WORDS = /\b(decided|decision|chose|chosen|approved|agreed|settled)\b/i;
+
+function appendCanonLines(canon: string, input: Pick<CheckpointInput, "decisions" | "rejected" | "open">): string {
+  const decisions = editLines("decision", input.decisions);
+  const rejected = editLines("rejected", input.rejected);
+  const open = editLines("open", input.open);
+  if (decisions.length + rejected.length + open.length === 0) return canon;
+
+  let next = appendSectionLines(canon.replace(/\r\n?/g, "\n"), "DECISIONS", decisions, ["REJECTED", "OPEN", "LATEST-PROGRESS", "NEXT-ACTION"]);
+  next = appendSectionLines(next, "REJECTED", rejected, ["OPEN", "LATEST-PROGRESS", "NEXT-ACTION"]);
+  return appendSectionLines(next, "OPEN", open, ["LATEST-PROGRESS", "NEXT-ACTION"]);
+}
+
+function editLines(flag: string, values: string[] | undefined): string[] {
+  return (values ?? []).map((value) => {
+    const line = value.replace(/\s*\n\s*/g, " ").trim();
+    if (!line) throw new Error(`--${flag} must not be empty`);
+    return line;
+  });
+}
+
+// Remove the open item each query matches; an OPEN section left without content goes too.
+function resolveOpenItems(canon: string, queries: string[]): string {
+  if (queries.length === 0) return canon;
+  const lines = canon.split("\n");
+  const items = openItemLines(lines);
+  const drop = new Set<number>();
+  for (const query of queries) {
+    const needle = itemKey(query);
+    const matches = items.filter((item) => itemKey(item.text).includes(needle));
+    if (matches.length === 0) throw new Error(`no open item matches --resolve "${query}"; open items: ${describeItems(items)}`);
+    if (matches.length > 1) throw new Error(`--resolve "${query}" matches ${matches.length} open items; use more specific text: ${describeItems(matches)}`);
+    drop.add(matches[0].index);
+  }
+  for (const section of canonSections(lines)) {
+    const body = lines.slice(section.start + 1, section.end);
+    if (!OPEN_SECTION.test(section.name) || !body.every((line, k) => !line.trim() || drop.has(section.start + 1 + k))) continue;
+    for (let i = section.start; i < section.end; i += 1) drop.add(i);
+  }
+  const result = lines.filter((_, i) => !drop.has(i)).join("\n");
+  return canon.endsWith("\n") && !result.endsWith("\n") ? `${result}\n` : result;
+}
+
+// Append `- <line>` items to `## <name>`, skipping lines it already holds; create the
+// section before the first existing `beforeNames` section (or at the end) when missing.
+function appendSectionLines(canon: string, name: string, additions: string[], beforeNames: string[]): string {
+  if (additions.length === 0) return canon;
+  const lines = canon.split("\n");
+  const sections = canonSections(lines);
+  const section = sections.find((s) => s.name === name || s.name.startsWith(`${name} (`));
+  const seen = new Set(section ? lines.slice(section.start + 1, section.end).map(itemKey) : []);
+  const fresh: string[] = [];
+  for (const line of additions) {
+    if (seen.has(itemKey(line))) continue;
+    seen.add(itemKey(line));
+    fresh.push(`- ${line.replace(/^[-*]\s+/, "")}`);
+  }
+  if (fresh.length === 0) return canon;
+
+  if (section) {
+    let last = section.end - 1;
+    while (last > section.start && !lines[last].trim()) last -= 1;
+    return [...lines.slice(0, last + 1), ...fresh, ...lines.slice(last + 1)].join("\n");
+  }
+  const block = [`## ${name}`, ...fresh, ""];
+  const before = sections.find((s) => beforeNames.some((n) => s.name === n || s.name.startsWith(`${n} `)));
+  if (before) return [...lines.slice(0, before.start), ...block, ...lines.slice(before.start)].join("\n");
+  return [canon.trimEnd(), "", ...block].join("\n");
+}
+
+interface CanonSection {
+  name: string;
+  start: number;
+  end: number;
+}
+
+function canonSections(lines: string[]): CanonSection[] {
+  const prose = proseLines(lines);
+  const starts = lines.flatMap((line, i) => (prose[i] && line.startsWith("## ") ? [i] : []));
+  return starts.map((start, n) => ({ name: lines[start].slice(3).trim(), start, end: starts[n + 1] ?? lines.length }));
+}
+
+function openItemLines(lines: string[]): Array<OpenCanonItem & { index: number }> {
+  const prose = proseLines(lines);
+  return canonSections(lines).flatMap((section) => {
+    const open = OPEN_SECTION.test(section.name);
+    if (!open && NO_OPEN_ITEMS_SECTION.test(section.name)) return [];
+    const items: Array<OpenCanonItem & { index: number }> = [];
+    for (let i = section.start + 1; i < section.end; i += 1) {
+      const text = lines[i].trim();
+      if (!prose[i] || !text || NONE_ITEM.test(text)) continue;
+      if (open || AWAITING.test(text)) items.push({ index: i, section: section.name, text });
+    }
+    return items;
+  });
+}
+
+function itemKey(line: string): string {
+  return line.trim().replace(/^[-*]\s+/, "").replace(/\s+/g, " ").toLowerCase();
+}
+
+function describeItems(items: OpenCanonItem[]): string {
+  if (items.length === 0) return "none";
+  return items.map((item) => `[${item.section}] ${truncateLine(item.text, 80)}`).join("; ");
+}
+
+export function truncateLine(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 3)}...`;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function setStatusLine(canon: string, status: string): string {

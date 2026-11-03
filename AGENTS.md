@@ -109,6 +109,12 @@ continuity checkpoint --daemon \
   --next "<single next action>"
 ```
 
+The next checkpoint replaces progress and next. When the user decides
+something, record it with `--decision "<text>"` and close the open item it
+settles with `--resolve "<open item text>"` in the same call. Read the open
+items that the checkpoint and `resume` print; do not present them as decided or
+undecided without a check.
+
 If a reconciled canon already exists and you have updated its content, pass it
 through daemon authority with `--canon-file`:
 

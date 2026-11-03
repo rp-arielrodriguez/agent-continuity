@@ -51,14 +51,15 @@ const CONTRACTS: Record<AgentIntentKind, AgentIntentContract> = {
   checkpoint: contract({
     intent: "checkpoint",
     purpose: "Persist useful progress and reconcile current task truth through the daemon.",
-    preferredCommand: "continuity checkpoint --daemon --project-id <PROJECT-ID> --task-id <TASK-ID> --lane-id <LANE-ID> --status <STATUS> --progress <SUMMARY> --next <NEXT> [--canon-file <FILE>]",
+    preferredCommand: "continuity checkpoint --daemon --project-id <PROJECT-ID> --task-id <TASK-ID> --lane-id <LANE-ID> --status <STATUS> --progress <SUMMARY> --next <NEXT> [--decision <TEXT>] [--resolve <OPEN-ITEM-TEXT>] [--canon-file <FILE>]",
     requiredContext: ["projectId", "taskId", "status", "progress", "next"],
-    optionalContext: ["laneId (default: main)", "canon-file", "blocking", "files", "sessionId"],
+    optionalContext: ["laneId (default: main)", "decision (repeatable)", "rejected (repeatable)", "open (repeatable)", "resolve (repeatable)", "canon-file", "blocking", "files", "sessionId"],
     invariants: [
       AUTHORITY_INVARIANT,
       PROJECT_INVARIANT,
       "The agent owns the semantic summary and reconciled canon; Continuity owns validation, persistence, and projection.",
       "Do not edit markdown checkpoint projections as authority.",
+      "The next checkpoint replaces progress and next; record a decision with --decision and close the open item it settles with --resolve in the same call.",
     ],
   }),
   claim: contract({
